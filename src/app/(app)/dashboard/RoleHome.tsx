@@ -66,7 +66,7 @@ function TxnRows({ rows, empty }: { rows: RowLike[]; empty: string }) {
                 {r.customerName} · {scenarioLabel(r.scenarioCode)}
               </span>
             </span>
-            <span className="flex shrink-0 items-center gap-2">
+            <span className="flex flex-wrap items-center justify-end gap-2">
               <SlaBadge sla={r.sla} />
               <TxnStatusBadge status={r.status} />
               <Money value={r.headlineAmt} compact className="text-[13px] font-medium" />
@@ -180,7 +180,7 @@ function AoView({ d }: { d: AoDashboard }) {
                     {r.attempts ? ` · ${r.attempts} attempt${r.attempts === 1 ? '' : 's'}` : ''}
                   </span>
                 </span>
-                <span className="flex shrink-0 items-center gap-2">
+                <span className="flex flex-wrap items-center justify-end gap-2">
                   <SlaBadge sla={r.sla} />
                   <LinkButton href={`/transactions/${r.id}`} size="sm" icon={PhoneCall}>
                     Call now
@@ -314,7 +314,7 @@ function OpsView({ d }: { d: OpsDashboard }) {
                     {r.customerName} · {scenarioLabel(r.scenarioCode)}
                   </span>
                 </span>
-                <span className="flex shrink-0 items-center gap-2">
+                <span className="flex flex-wrap items-center justify-end gap-2">
                   <Badge tone={r.gapsRequired ? 'info' : 'neutral'}>
                     {r.gapsRequired ? 'GAPS' : 'Internal'}
                   </Badge>

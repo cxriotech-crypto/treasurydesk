@@ -255,7 +255,7 @@ export default function InvestmentDetailPage() {
                         {scenarioLabel(t.scenarioCode)} · {formatDateTime(t.createdAt)}
                       </span>
                     </span>
-                    <span className="flex shrink-0 items-center gap-2">
+                    <span className="flex flex-wrap items-center justify-end gap-2">
                       <TxnStatusBadge status={t.status} />
                       <Money value={t.headlineAmt} compact className="text-[13px]" />
                     </span>

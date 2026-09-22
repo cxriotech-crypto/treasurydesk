@@ -2,11 +2,15 @@
 
 import { Toaster as SonnerToaster, toast as sonner } from 'sonner';
 
-/** App toasts (no alert()). Styled to the design tokens; bottom-right on desktop, bottom on phones. */
+/**
+ * App toasts (no alert()). Styled to the design tokens; bottom-right on desktop, bottom on phones.
+ * They sit below the modal layer (z-50) so a toast can never cover a dialog's buttons.
+ */
 export function Toaster() {
   return (
     <SonnerToaster
       position="bottom-right"
+      className="!z-40"
       closeButton
       toastOptions={{
         classNames: {

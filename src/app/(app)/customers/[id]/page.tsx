@@ -512,7 +512,7 @@ export default function CustomerDetailPage() {
                           {formatDate(i.maturityDate)}
                         </span>
                       </span>
-                      <span className="flex shrink-0 items-center gap-2">
+                      <span className="flex flex-wrap items-center justify-end gap-2">
                         <InvestmentStatusBadge status={i.status} />
                         <Money value={i.principalAmt} compact className="text-[13px] font-medium" />
                       </span>
@@ -594,7 +594,7 @@ export default function CustomerDetailPage() {
                           {scenarioLabel(t.scenarioCode)} · {formatDateTime(t.createdAt)}
                         </span>
                       </span>
-                      <span className="flex shrink-0 items-center gap-2">
+                      <span className="flex flex-wrap items-center justify-end gap-2">
                         <TxnStatusBadge status={t.status} />
                         <Money value={t.headlineAmt} compact className="text-[13px]" />
                       </span>

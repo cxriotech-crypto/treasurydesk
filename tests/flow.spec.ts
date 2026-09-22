@@ -45,7 +45,7 @@ async function buildToVoucher(page: import('@playwright/test').Page, type: RegEx
   // Step 4 – call-back
   await expect(page.getByRole('heading', { name: /4\. Call-back/ })).toBeVisible();
   for (const item of ['Amount confirmed', 'Instruction confirmed', 'Beneficiary confirmed', 'Purpose confirmed']) {
-    await page.getByRole('radiogroup', { name: item }).getByRole('radio', { name: 'Confirmed' }).click();
+    await page.getByRole('radiogroup', { name: item }).getByRole('radio', { name: 'Confirmed', exact: true }).click();
   }
   await page.getByRole('radio', { name: 'Confirmed', exact: true }).last().check();
   await page.getByRole('button', { name: 'Save call-back' }).click();
@@ -152,6 +152,7 @@ test.describe('Transaction flows', () => {
     await drawer.getByRole('button', { name: 'Use demo reference' }).click();
     await drawer.getByRole('button', { name: /Send to GAPS|Retry GAPS submission/ }).click();
     await expect(drawer.getByText('Last GAPS submission failed')).toBeVisible({ timeout: 40_000 });
+    await drawer.getByRole('button', { name: 'Close' }).click(); // the drawer stays open for a retry
 
     await switchTo(page, 'ADM');
     await page.goto('/settings');

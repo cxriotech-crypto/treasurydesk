@@ -128,7 +128,7 @@ test.describe('CRUD', () => {
     await logButton.click();
     const dialog = page.getByRole('dialog');
     for (const item of ['Amount confirmed', 'Instruction confirmed', 'Beneficiary confirmed', 'Purpose confirmed']) {
-      await dialog.getByRole('radiogroup', { name: item }).getByRole('radio', { name: 'Confirmed' }).click();
+      await dialog.getByRole('radiogroup', { name: item }).getByRole('radio', { name: 'Confirmed', exact: true }).click();
     }
     await dialog.getByRole('radio', { name: 'Confirmed', exact: true }).last().check();
     await dialog.getByRole('button', { name: 'Save call-back' }).click();
