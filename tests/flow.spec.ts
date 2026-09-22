@@ -74,7 +74,7 @@ test.describe('Transaction flows', () => {
     await expect(page.getByText('Pre-liquidation charge')).toBeVisible();
     await page.getByRole('button', { name: 'Sign & submit' }).click();
     await sign(page, 'TO', 'Sign & submit');
-    await expect(page.getByText('Awaiting Head Treasury')).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByText('Awaiting Head Treasury', { exact: true }).first()).toBeVisible({ timeout: 20_000 });
 
     // Maker cannot approve their own transaction.
     await expect(page.getByRole('button', { name: 'Approve & sign' })).toHaveCount(0);
@@ -83,13 +83,13 @@ test.describe('Transaction flows', () => {
     await switchTo(page, 'HT');
     await page.getByRole('button', { name: 'Approve & sign' }).first().click();
     await sign(page, 'HT');
-    await expect(page.getByText('Awaiting MIS')).toBeVisible();
+    await expect(page.getByText('Awaiting MIS', { exact: true }).first()).toBeVisible();
 
     await switchTo(page, 'MIS');
     await page.getByRole('button', { name: 'Return to maker' }).first().click();
     await page.getByRole('dialog').getByLabel('Comment to the maker').fill('Attach a clearer scan');
     await page.getByRole('dialog').getByRole('button', { name: 'Return to maker' }).click();
-    await expect(page.getByText('Returned for correction')).toBeVisible();
+    await expect(page.getByText('Returned for correction', { exact: true }).first()).toBeVisible();
 
     await switchTo(page, 'TO');
     await page.getByRole('link', { name: 'Correct and resubmit' }).click();
@@ -102,7 +102,7 @@ test.describe('Transaction flows', () => {
       await page.getByRole('button', { name: 'Approve & sign' }).first().click();
       await sign(page, role);
     }
-    await expect(page.getByText('Ready for Operations')).toBeVisible();
+    await expect(page.getByText('Ready for Operations', { exact: true }).first()).toBeVisible();
 
     // Operations execute, Treasury confirms.
     await switchTo(page, 'OPS');
@@ -110,8 +110,8 @@ test.describe('Transaction flows', () => {
     const drawer = page.getByRole('dialog');
     await drawer.getByRole('button', { name: 'Use demo reference' }).click();
     await drawer.getByRole('button', { name: /Mark executed|Send to GAPS/ }).click();
-    await expect(drawer.getByText('Executed')).toBeVisible({ timeout: 30_000 });
-    await drawer.getByRole('button', { name: 'Close' }).click();
+    await expect(drawer.getByText('Executed', { exact: true }).first()).toBeVisible({ timeout: 30_000 });
+    await drawer.getByRole('button', { name: 'Close' }).first().click();
 
     await switchTo(page, 'TO');
     await page.getByRole('button', { name: 'Confirm completion' }).click();
@@ -152,7 +152,7 @@ test.describe('Transaction flows', () => {
     await drawer.getByRole('button', { name: 'Use demo reference' }).click();
     await drawer.getByRole('button', { name: /Send to GAPS|Retry GAPS submission/ }).click();
     await expect(drawer.getByText('Last GAPS submission failed')).toBeVisible({ timeout: 40_000 });
-    await drawer.getByRole('button', { name: 'Close' }).click(); // the drawer stays open for a retry
+    await drawer.getByRole('button', { name: 'Close' }).first().click(); // the drawer stays open for a retry
 
     await switchTo(page, 'ADM');
     await page.goto('/settings');
@@ -168,7 +168,7 @@ test.describe('Transaction flows', () => {
     const retry = page.getByRole('dialog');
     await retry.getByRole('button', { name: 'Use demo reference' }).click();
     await retry.getByRole('button', { name: /Retry GAPS submission|Send to GAPS/ }).click();
-    await expect(retry.getByText('Executed')).toBeVisible({ timeout: 40_000 });
+    await expect(retry.getByText('Executed', { exact: true }).first()).toBeVisible({ timeout: 40_000 });
   });
 
   test('approvers can bulk approve with one signature', async ({ page }) => {

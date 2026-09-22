@@ -19,6 +19,14 @@ function Portal({ children }: { children: ReactNode }) {
   return isClient ? createPortal(children, document.body) : null;
 }
 
+/**
+ * The dimmed backdrop. It sits below the toast layer (z-40) and the panel (z-50), so a toast
+ * stays readable while a dialog is open without ever covering the dialog's buttons.
+ */
+function Scrim({ onClose }: { onClose?: () => void }) {
+  return <div className="fixed inset-0 z-30 bg-overlay/50" onClick={onClose} aria-hidden />;
+}
+
 interface PanelProps {
   open: boolean;
   onClose: () => void;
@@ -53,12 +61,8 @@ export function Modal({
   if (!open) return null;
   return (
     <Portal>
-      <div className="fixed inset-0 z-50 flex items-stretch justify-center md:items-center md:p-6">
-        <div
-          className="absolute inset-0 bg-overlay/50"
-          onClick={dismissible ? onClose : undefined}
-          aria-hidden
-        />
+      <Scrim onClose={dismissible ? onClose : undefined} />
+      <div className="pointer-events-none fixed inset-0 z-50 flex items-stretch justify-center md:items-center md:p-6">
         <div
           ref={ref}
           role="dialog"
@@ -66,7 +70,7 @@ export function Modal({
           aria-label={typeof title === 'string' ? title : ariaLabel}
           tabIndex={-1}
           className={cn(
-            'relative flex w-full flex-col bg-surface shadow-pop focus:outline-none',
+            'pointer-events-auto relative flex w-full flex-col bg-surface shadow-pop focus:outline-none',
             'h-full md:h-auto md:max-h-[calc(100vh-3rem)] md:rounded-lg md:border md:border-border',
             size === 'sm' ? 'md:max-w-md' : size === 'lg' ? 'md:max-w-3xl' : 'md:max-w-xl'
           )}
@@ -112,12 +116,8 @@ export function Drawer({
   if (!open) return null;
   return (
     <Portal>
-      <div className="fixed inset-0 z-50">
-        <div
-          className="absolute inset-0 bg-overlay/50"
-          onClick={dismissible ? onClose : undefined}
-          aria-hidden
-        />
+      <Scrim onClose={dismissible ? onClose : undefined} />
+      <div className="pointer-events-none fixed inset-0 z-50">
         <div
           ref={ref}
           role="dialog"
@@ -125,7 +125,7 @@ export function Drawer({
           aria-label={typeof title === 'string' ? title : ariaLabel}
           tabIndex={-1}
           className={cn(
-            'absolute inset-y-0 flex w-full flex-col bg-surface shadow-pop focus:outline-none',
+            'pointer-events-auto absolute inset-y-0 flex w-full flex-col bg-surface shadow-pop focus:outline-none',
             width,
             side === 'right'
               ? 'right-0 md:border-l md:border-border'
@@ -170,15 +170,15 @@ export function BottomSheet({
   if (!open) return null;
   return (
     <Portal>
-      <div className="fixed inset-0 z-50">
-        <div className="absolute inset-0 bg-overlay/50" onClick={onClose} aria-hidden />
+      <Scrim onClose={onClose} />
+      <div className="pointer-events-none fixed inset-0 z-50">
         <div
           ref={ref}
           role="dialog"
           aria-modal="true"
           aria-label={typeof title === 'string' ? title : ariaLabel}
           tabIndex={-1}
-          className="absolute inset-x-0 bottom-0 flex max-h-[85vh] flex-col rounded-t-lg border-t border-border bg-surface shadow-pop focus:outline-none"
+          className="pointer-events-auto absolute inset-x-0 bottom-0 flex max-h-[85vh] flex-col rounded-t-lg border-t border-border bg-surface shadow-pop focus:outline-none"
         >
           <div className="mx-auto mt-2 h-1 w-10 rounded-full bg-border-strong" aria-hidden />
           <div className="flex items-start justify-between gap-4 px-4 py-2">
