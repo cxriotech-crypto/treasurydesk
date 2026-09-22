@@ -1,72 +1,114 @@
-import React from 'react';
-import { Check, AlertCircle } from 'lucide-react';
+'use client';
 
-interface Step {
-  id: string;
+import { Check } from 'lucide-react';
+import { cn } from './cn';
+import { Icon } from './Icon';
+
+export interface StepItem {
+  key: string;
   label: string;
-  description?: string;
-  status: 'completed' | 'current' | 'pending' | 'error';
+  /** done = completed, current = in progress, todo = not started, failed = blocked. */
+  state: 'done' | 'current' | 'todo' | 'failed';
+  hint?: string;
 }
 
-interface StepperProps {
-  steps: Step[];
-  orientation?: 'horizontal' | 'vertical';
-}
-
-export default function Stepper({ steps, orientation = 'horizontal' }: StepperProps) {
-  if (orientation === 'vertical') {
-    return (
-      <div className="flex flex-col">
-        {steps.map((step, i) => (
-          <div key={`vstep-${step.id}`} className="flex gap-3">
-            {/* Line + dot column */}
-            <div className="flex flex-col items-center">
-              <div className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 border-2 text-xs font-bold
-                ${step.status === 'completed' ? 'bg-accent border-accent text-white' : ''}
-                ${step.status === 'current' ? 'bg-primary border-primary text-white' : ''}
-                ${step.status === 'pending' ? 'bg-card border-border text-muted-foreground' : ''}
-                ${step.status === 'error' ? 'bg-red-50 border-red-500 text-red-600' : ''}`}>
-                {step.status === 'completed' ? <Check size={12} /> : step.status === 'error' ? <AlertCircle size={12} /> : i + 1}
-              </div>
-              {i < steps.length - 1 && (
-                <div className={`w-0.5 flex-1 my-1 min-h-[20px] ${step.status === 'completed' ? 'bg-accent' : 'bg-border'}`} />
-              )}
-            </div>
-            {/* Content */}
-            <div className="pb-5">
-              <p className={`text-sm font-semibold leading-none mb-0.5 ${step.status === 'current' ? 'text-primary' : step.status === 'completed' ? 'text-foreground' : 'text-muted-foreground'}`}>
-                {step.label}
-              </p>
-              {step.description && <p className="text-xs text-muted-foreground">{step.description}</p>}
-            </div>
-          </div>
-        ))}
-      </div>
-    );
-  }
-
+/**
+ * Wizard stepper: vertical list on desktop (left rail), compact "Step 3 of 6" header with a
+ * progress bar below 768 px.
+ */
+export function Stepper({
+  steps,
+  onSelect,
+  canSelect,
+  orientation = 'vertical',
+}: {
+  steps: StepItem[];
+  onSelect?: (key: string) => void;
+  canSelect?: (step: StepItem) => boolean;
+  orientation?: 'vertical' | 'horizontal';
+}) {
+  const currentIdx = Math.max(
+    0,
+    steps.findIndex((s) => s.state === 'current')
+  );
+  const done = steps.filter((s) => s.state === 'done').length;
   return (
-    <div className="flex items-start w-full overflow-x-auto">
-      {steps.map((step, i) => (
-        <React.Fragment key={`hstep-${step.id}`}>
-          <div className="flex flex-col items-center min-w-[80px] flex-1">
-            <div className={`w-8 h-8 rounded-full flex items-center justify-center border-2 text-xs font-bold mb-1.5
-              ${step.status === 'completed' ? 'bg-accent border-accent text-white' : ''}
-              ${step.status === 'current' ? 'bg-primary border-primary text-white' : ''}
-              ${step.status === 'pending' ? 'bg-card border-border text-muted-foreground' : ''}
-              ${step.status === 'error' ? 'bg-red-50 border-red-500 text-red-600' : ''}`}>
-              {step.status === 'completed' ? <Check size={12} /> : step.status === 'error' ? <AlertCircle size={12} /> : i + 1}
-            </div>
-            <p className={`text-xs font-medium text-center leading-tight
-              ${step.status === 'current' ? 'text-primary' : step.status === 'completed' ? 'text-foreground' : 'text-muted-foreground'}`}>
-              {step.label}
-            </p>
-          </div>
-          {i < steps.length - 1 && (
-            <div className={`flex-1 h-0.5 mt-4 ${step.status === 'completed' ? 'bg-accent' : 'bg-border'}`} />
-          )}
-        </React.Fragment>
-      ))}
-    </div>
+    <>
+      {/* Phones: compact header */}
+      <div className="md:hidden" aria-label="Progress">
+        <p className="text-[13px] text-muted">
+          Step <span className="num font-semibold text-fg">{currentIdx + 1}</span> of{' '}
+          <span className="num">{steps.length}</span>
+          <span className="text-fg"> · {steps[currentIdx]?.label}</span>
+        </p>
+        <div
+          className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-surface-2"
+          role="progressbar"
+          aria-valuemin={0}
+          aria-valuemax={steps.length}
+          aria-valuenow={done}
+        >
+          <div
+            className="h-full rounded-full bg-teal-bright transition-all"
+            style={{ width: `${(Math.max(done, currentIdx) / steps.length) * 100}%` }}
+          />
+        </div>
+      </div>
+
+      {/* Tablet / desktop */}
+      <ol
+        className={cn(
+          'hidden md:flex',
+          orientation === 'vertical' ? 'flex-col gap-1' : 'flex-row flex-wrap gap-2'
+        )}
+      >
+        {steps.map((s, i) => {
+          const selectable = !!onSelect && (canSelect ? canSelect(s) : s.state !== 'todo');
+          const body = (
+            <>
+              <span
+                className={cn(
+                  'num flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-xs font-semibold',
+                  s.state === 'done' && 'border-teal-bright bg-teal-bright text-white dark:text-bg',
+                  s.state === 'current' && 'border-brand bg-brand text-brand-fg',
+                  s.state === 'todo' && 'border-border-strong text-muted',
+                  s.state === 'failed' && 'border-st-danger-fg bg-st-danger-bg text-st-danger-fg'
+                )}
+              >
+                {s.state === 'done' ? <Icon icon={Check} size={14} /> : i + 1}
+              </span>
+              <span className="min-w-0 text-left">
+                <span
+                  className={cn(
+                    'block truncate text-sm',
+                    s.state === 'current' ? 'font-semibold' : s.state === 'todo' ? 'text-muted' : ''
+                  )}
+                >
+                  {s.label}
+                </span>
+                {s.hint ? (
+                  <span className="block truncate text-xs text-muted">{s.hint}</span>
+                ) : null}
+              </span>
+            </>
+          );
+          return (
+            <li key={s.key} aria-current={s.state === 'current' ? 'step' : undefined}>
+              {selectable ? (
+                <button
+                  type="button"
+                  onClick={() => onSelect!(s.key)}
+                  className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 hover:bg-surface-2"
+                >
+                  {body}
+                </button>
+              ) : (
+                <div className="flex items-center gap-2.5 px-2 py-1.5">{body}</div>
+              )}
+            </li>
+          );
+        })}
+      </ol>
+    </>
   );
 }

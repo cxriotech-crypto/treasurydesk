@@ -1,17 +1,19 @@
 'use client';
+
 import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { getSession } from '@/services/userService';
+import { authService } from '@/services';
+import { Brand } from '@/components/shell/Brand';
 
-export default function HomePage() {
+/** Entry: signed-in users go to their dashboard, everyone else to sign-in. */
+export default function Home() {
   const router = useRouter();
   useEffect(() => {
-    const session = getSession();
-    if (session) {
-      router?.replace('/dashboard');
-    } else {
-      router?.replace('/login');
-    }
+    router.replace(authService.current() ? '/dashboard' : '/login');
   }, [router]);
-  return null;
+  return (
+    <main className="flex min-h-screen items-center justify-center">
+      <Brand />
+    </main>
+  );
 }

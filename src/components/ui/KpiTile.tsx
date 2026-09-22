@@ -1,41 +1,83 @@
-import React from 'react';
-import type { LucideIcon } from 'lucide-react';
-import Icon from '@/components/ui/AppIcon';
+'use client';
 
+import Link from 'next/link';
+import type { ReactNode } from 'react';
+import { formatCount, formatNaira, formatNairaCompact } from '@/lib/format';
+import { cn } from './cn';
+import { Skeleton } from './States';
 
-interface KpiTileProps {
+export interface KpiTileProps {
   label: string;
-  value: string | number;
-  subValue?: string;
-  icon: LucideIcon;
-  trend?: 'up' | 'down' | 'neutral' | 'alert';
-  trendLabel?: string;
-  variant?: 'default' | 'alert' | 'success' | 'warning' | 'info';
-  compact?: boolean;
+  /** Count or money string (computed by services). */
+  value: number | string | null | undefined;
+  kind?: 'count' | 'money' | 'text';
+  /** Secondary line, e.g. "₦1.2B total" or "oldest 3h 10m". */
+  sub?: ReactNode;
+  /** Clicking the tile opens this (filtered list). Only pass routes that exist. */
+  href?: string;
+  tone?: 'default' | 'warning' | 'danger';
+  loading?: boolean;
 }
 
-const VARIANT_STYLES = {
-  default: { card: 'bg-card border-border', icon: 'bg-primary/10 text-primary', value: 'text-foreground' },
-  alert: { card: 'bg-red-50 border-red-200', icon: 'bg-red-100 text-red-600', value: 'text-red-700' },
-  success: { card: 'bg-green-50 border-green-200', icon: 'bg-green-100 text-green-600', value: 'text-green-700' },
-  warning: { card: 'bg-amber-50 border-amber-200', icon: 'bg-amber-100 text-amber-600', value: 'text-amber-700' },
-  info: { card: 'bg-blue-50 border-blue-200', icon: 'bg-blue-100 text-blue-600', value: 'text-blue-700' },
-};
-
-export default function KpiTile({ label, value, subValue, icon: Icon, trendLabel, variant = 'default', compact = false }: KpiTileProps) {
-  const styles = VARIANT_STYLES[variant];
-  return (
-    <div className={`rounded-xl border p-4 ${styles.card} ${compact ? '' : 'min-h-[100px]'}`}>
-      <div className="flex items-start justify-between mb-2">
-        <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide leading-none">{label}</p>
-        <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${styles.icon}`}>
-          <Icon size={16} />
-        </div>
-      </div>
-      <p className={`text-2xl font-bold tabular-nums leading-none mb-1 ${styles.value}`}>{value}</p>
-      {(subValue || trendLabel) && (
-        <p className="text-xs text-muted-foreground">{subValue ?? trendLabel}</p>
+/** Compact KPI tile. Money shows compact (₦10.53M) with the exact value on hover. */
+export function KpiTile({
+  label,
+  value,
+  kind = 'count',
+  sub,
+  href,
+  tone = 'default',
+  loading,
+}: KpiTileProps) {
+  const text =
+    value === null || value === undefined
+      ? '—'
+      : kind === 'money'
+        ? formatNairaCompact(String(value))
+        : kind === 'count'
+          ? formatCount(Number(value))
+          : String(value);
+  const exact =
+    kind === 'money' && value !== null && value !== undefined
+      ? formatNaira(String(value))
+      : undefined;
+  const inner = (
+    <>
+      <p className="text-[13px] font-medium leading-snug text-muted">{label}</p>
+      {loading ? (
+        <Skeleton className="mt-2 h-7 w-20" />
+      ) : (
+        <p
+          title={exact}
+          className={cn(
+            'num mt-1 text-2xl font-semibold tracking-tight',
+            tone === 'warning' && 'text-st-warning-fg',
+            tone === 'danger' && 'text-st-danger-fg'
+          )}
+        >
+          {text}
+        </p>
       )}
-    </div>
+      {sub && !loading ? <p className="mt-0.5 truncate text-xs text-muted">{sub}</p> : null}
+    </>
   );
+  const cls = 'block min-w-0 rounded-lg border border-border bg-surface px-4 py-3';
+  return href ? (
+    <Link
+      href={href}
+      className={cn(
+        cls,
+        'transition-colors hover:border-border-strong hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'
+      )}
+    >
+      {inner}
+    </Link>
+  ) : (
+    <div className={cls}>{inner}</div>
+  );
+}
+
+/** Responsive grid for KPI tiles: 2 per row on phones. */
+export function KpiGrid({ children }: { children: ReactNode }) {
+  return <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">{children}</div>;
 }

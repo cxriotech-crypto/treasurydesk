@@ -2,204 +2,113 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Design tokens. Neutral zinc base, one brand accent (navy #0B2545), restrained teal for positive/progress.
+ * Status colours are soft backgrounds with strong text, used only in badges and small indicators.
+ * Every text/background pair below meets WCAG AA (4.5:1) in both themes.
+ */
 :root {
-  --background: #F0F4F8;
-  --foreground: #0D1B2A;
-  --primary: #0B2545;
-  --primary-foreground: #FFFFFF;
-  --secondary: #E8EDF3;
-  --secondary-foreground: #0B2545;
-  --accent: #13A89E;
-  --accent-foreground: #FFFFFF;
-  --muted: #E2E8F0;
-  --muted-foreground: #64748B;
-  --card: #FFFFFF;
-  --card-foreground: #0D1B2A;
-  --border: #CBD5E1;
-  --input: #FFFFFF;
-  --ring: #13A89E;
+  --bg: 250 250 250; /* zinc-50: page */
+  --surface: 255 255 255; /* cards, panels */
+  --surface-2: 244 244 245; /* zinc-100: subtle fills, table header, shaded calc fields */
+  --border: 228 228 231; /* zinc-200 */
+  --border-strong: 212 212 216; /* zinc-300 */
+  --fg: 24 24 27; /* zinc-900 */
+  --muted: 82 82 91; /* zinc-600 */
+  --subtle: 113 113 122; /* zinc-500 (large text / icons only) */
+
+  --brand: 11 37 69; /* #0B2545 */
+  --brand-fg: 255 255 255;
+  --brand-hover: 19 52 94;
+  --brand-soft: 232 237 243;
+  --teal: 13 125 118; /* darker than #13A89E so text passes AA on white */
+  --teal-bright: 19 168 158; /* #13A89E for bars / fills */
+
+  --ring: 19 168 158;
+
+  --st-neutral-bg: 244 244 245;
+  --st-neutral-fg: 63 63 70;
+  --st-info-bg: 232 240 254;
+  --st-info-fg: 29 78 216;
+  --st-warning-bg: 254 243 199;
+  --st-warning-fg: 146 64 14;
+  --st-accent-bg: 224 242 241;
+  --st-accent-fg: 15 110 104;
+  --st-success-bg: 220 252 231;
+  --st-success-fg: 21 128 61;
+  --st-danger-bg: 254 226 226;
+  --st-danger-fg: 185 28 28;
+
+  --overlay: 9 9 11;
   --radius: 8px;
-  --font-sans: var(--font-plus-jakarta), 'Plus Jakarta Sans', sans-serif;
-
-  --status-pending: #F59E0B;
-  --status-pending-bg: #FEF3C7;
-  --status-success: #10B981;
-  --status-success-bg: #D1FAE5;
-  --status-danger: #EF4444;
-  --status-danger-bg: #FEE2E2;
-  --status-info: #3B82F6;
-  --status-info-bg: #DBEAFE;
-  --status-navy: #0B2545;
-  --status-navy-bg: #E8EDF3;
-  --status-teal: #13A89E;
-  --status-teal-bg: #CCFBF1;
-
-  --sidebar-width: 240px;
-  --sidebar-collapsed: 64px;
-  --topbar-height: 60px;
+  --radius-sm: 6px;
+  color-scheme: light;
 }
 
 .dark {
-  --background: #0A1628;
-  --foreground: #E2E8F0;
-  --primary: #1A3A6B;
-  --primary-foreground: #FFFFFF;
-  --secondary: #1E2D45;
-  --secondary-foreground: #CBD5E1;
-  --accent: #13A89E;
-  --accent-foreground: #FFFFFF;
-  --muted: #1E2D45;
-  --muted-foreground: #94A3B8;
-  --card: #112240;
-  --card-foreground: #E2E8F0;
-  --border: #1E3A5F;
-  --input: #112240;
-  --ring: #13A89E;
+  --bg: 9 9 11;
+  --surface: 20 20 23;
+  --surface-2: 30 30 34;
+  --border: 39 39 42;
+  --border-strong: 63 63 70;
+  --fg: 244 244 245;
+  --muted: 161 161 170;
+  --subtle: 128 128 138;
+
+  --brand: 147 180 224;
+  --brand-fg: 9 20 38;
+  --brand-hover: 173 199 235;
+  --brand-soft: 24 36 56;
+  --teal: 64 201 190;
+  --teal-bright: 45 190 178;
+
+  --ring: 64 201 190;
+
+  --st-neutral-bg: 39 39 42;
+  --st-neutral-fg: 212 212 216;
+  --st-info-bg: 23 37 84;
+  --st-info-fg: 147 197 253;
+  --st-warning-bg: 66 32 6;
+  --st-warning-fg: 253 211 77;
+  --st-accent-bg: 4 47 46;
+  --st-accent-fg: 94 234 212;
+  --st-success-bg: 5 46 22;
+  --st-success-fg: 134 239 172;
+  --st-danger-bg: 69 10 10;
+  --st-danger-fg: 252 165 165;
+
+  --overlay: 0 0 0;
+  color-scheme: dark;
 }
 
 @layer base {
-  * {
-    box-sizing: border-box;
-    border-color: var(--border);
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+  html,
+  body {
+    background: rgb(var(--bg));
+    color: rgb(var(--fg));
   }
   body {
-    background-color: var(--background);
-    color: var(--foreground);
-    font-family: var(--font-sans);
-    -webkit-font-smoothing: antialiased;
-    -moz-osx-font-smoothing: grayscale;
+    font-size: 14px;
+    line-height: 1.45;
+    overflow-x: hidden;
   }
-  html {
-    scroll-behavior: smooth;
+  :focus-visible {
+    outline: 2px solid rgb(var(--ring));
+    outline-offset: 2px;
   }
-  h1, h2, h3, h4, h5, h6, p {
-    margin: 0;
+  ::selection {
+    background: rgb(var(--teal-bright) / 0.25);
   }
 }
 
 @layer utilities {
-  .tabular-nums {
+  .num {
     font-variant-numeric: tabular-nums;
-    font-feature-settings: "tnum";
-  }
-  .sidebar-transition {
-    transition: width 300ms ease, transform 300ms ease;
-  }
-  .fade-in {
-    animation: fadeIn 200ms ease forwards;
-  }
-  .slide-in-right {
-    animation: slideInRight 250ms ease forwards;
-  }
-  .slide-up {
-    animation: slideUp 200ms ease forwards;
-  }
-  .pulse-highlight {
-    animation: pulseHighlight 600ms ease;
   }
   .scrollbar-thin {
     scrollbar-width: thin;
-    scrollbar-color: var(--border) transparent;
   }
-  .scrollbar-thin::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
-  }
-  .scrollbar-thin::-webkit-scrollbar-track {
-    background: transparent;
-  }
-  .scrollbar-thin::-webkit-scrollbar-thumb {
-    background-color: var(--border);
-    border-radius: 3px;
-  }
-  .text-money {
-    font-variant-numeric: tabular-nums;
-    font-feature-settings: "tnum";
-    font-weight: 600;
-  }
-  .cut-off-urgent {
-    animation: urgentPulse 2s ease-in-out infinite;
-  }
-}
-
-@layer components {
-  .btn-primary {
-    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg
-           bg-primary text-primary-foreground font-semibold text-sm
-           transition-all duration-150 hover:opacity-90 active:scale-95
-           disabled:opacity-50 disabled:cursor-not-allowed;
-  }
-  .btn-secondary {
-    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg
-           bg-secondary text-secondary-foreground font-semibold text-sm
-           border border-border transition-all duration-150
-           hover:bg-muted active:scale-95
-           disabled:opacity-50 disabled:cursor-not-allowed;
-  }
-  .btn-accent {
-    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg
-           bg-accent text-accent-foreground font-semibold text-sm
-           transition-all duration-150 hover:opacity-90 active:scale-95
-           disabled:opacity-50 disabled:cursor-not-allowed;
-  }
-  .btn-danger {
-    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg
-           bg-red-500 text-white font-semibold text-sm
-           transition-all duration-150 hover:bg-red-600 active:scale-95
-           disabled:opacity-50 disabled:cursor-not-allowed;
-  }
-  .btn-ghost {
-    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg
-           text-muted-foreground font-medium text-sm
-           transition-all duration-150 hover:bg-muted active:scale-95
-           disabled:opacity-50 disabled:cursor-not-allowed;
-  }
-  .card {
-    @apply bg-card rounded-xl border border-border shadow-sm;
-  }
-  .input-field {
-    @apply w-full px-3 py-2 rounded-lg border border-border bg-input
-           text-foreground text-sm placeholder:text-muted-foreground
-           focus:outline-none focus:ring-2 focus:ring-ring focus:border-transparent
-           transition-all duration-150 disabled:opacity-50 disabled:cursor-not-allowed;
-  }
-  .label-text {
-    @apply block text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1;
-  }
-  .section-header {
-    @apply text-base font-semibold text-foreground;
-  }
-  .page-title {
-    @apply text-2xl font-bold text-foreground;
-  }
-  .nav-item {
-    @apply flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium
-           text-muted-foreground transition-all duration-150
-           hover:bg-secondary hover:text-foreground cursor-pointer;
-  }
-.nav-item-active  {
-    @apply text-accent font-semibold;
-  }
-}
-
-@keyframes fadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-@keyframes slideInRight {
-  from { transform: translateX(100%); opacity: 0; }
-  to { transform: translateX(0); opacity: 1; }
-}
-@keyframes slideUp {
-  from { transform: translateY(8px); opacity: 0; }
-  to { transform: translateY(0); opacity: 1; }
-}
-@keyframes pulseHighlight {
-  0% { background-color: transparent; }
-  30% { background-color: rgba(19, 168, 158, 0.15); }
-  100% { background-color: transparent; }
-}
-@keyframes urgentPulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.6; }
 }

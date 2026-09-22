@@ -1,231 +1,364 @@
 'use client';
-import React, { useState } from 'react';
-import { ChevronUp, ChevronDown, ChevronsUpDown, Download, ChevronLeft, ChevronRight } from 'lucide-react';
-import { TableSkeleton } from './LoadingSkeleton';
-import EmptyState from './EmptyState';
 
-export interface ColumnDef<T> {
+import Link from 'next/link';
+import { useRouter } from 'next/navigation';
+import type { ReactNode } from 'react';
+import {
+  ArrowDown,
+  ArrowUp,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsUpDown,
+  Download,
+} from 'lucide-react';
+import type { SortDir } from '@/domain/types';
+import { formatCount } from '@/lib/format';
+import { Button, IconButton } from './Button';
+import { cn } from './cn';
+import { Icon } from './Icon';
+import { EmptyState, ErrorState, Skeleton } from './States';
+
+export interface Column<T> {
   key: string;
-  header: string;
-  sortable?: boolean;
-  align?: 'left' | 'right' | 'center';
-  width?: string;
-  render?: (value: unknown, row: T) => React.ReactNode;
+  header: ReactNode;
+  cell: (row: T) => ReactNode;
+  /** Field name passed to the service sort (omit for unsortable columns). */
+  sortKey?: string;
+  align?: 'left' | 'right';
+  className?: string;
+  /** Role of this column in the stacked card shown below 768 px. */
+  card?: 'title' | 'status' | 'amount' | 'field' | 'hidden';
+  /** Short label used in the card (defaults to header). */
+  cardLabel?: string;
 }
 
-interface DataTableProps<T extends Record<string, unknown>> {
-  columns: ColumnDef<T>[];
-  data: T[];
-  total: number;
-  page: number;
-  pageSize: number;
-  onPageChange: (page: number) => void;
-  onPageSizeChange: (size: number) => void;
-  onSort?: (field: string, dir: 'asc' | 'desc') => void;
-  sortField?: string;
-  sortDir?: 'asc' | 'desc';
+export interface DataTableProps<T> {
+  columns: Column<T>[];
+  rows: T[] | undefined;
+  rowKey: (row: T) => string;
   loading?: boolean;
-  error?: string | null;
+  error?: Error | null;
   onRetry?: () => void;
+  /** Row navigation: a link (preferred) or a click handler. */
+  rowHref?: (row: T) => string | null;
   onRowClick?: (row: T) => void;
-  exportFilename?: string;
-  emptyTitle?: string;
-  emptyDescription?: string;
-  rowClassName?: (row: T) => string;
-  stickyHeader?: boolean;
+  sort?: { field: string; dir: SortDir };
+  onSortChange?: (sort: { field: string; dir: SortDir }) => void;
+  page?: number;
+  pageSize?: number;
+  total?: number;
+  onPageChange?: (page: number) => void;
+  empty?: { title: string; description?: ReactNode; action?: ReactNode };
+  /** Toolbar above the table (search, filters…). */
+  toolbar?: ReactNode;
+  onExport?: () => void;
+  selectable?: boolean;
+  selected?: Set<string>;
+  onSelectedChange?: (s: Set<string>) => void;
+  isSelectable?: (row: T) => boolean;
+  footer?: ReactNode;
+  caption?: string;
 }
 
-const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
-
-export default function DataTable<T extends Record<string, unknown>>({
-  columns, data, total, page, pageSize, onPageChange, onPageSizeChange,
-  onSort, sortField, sortDir, loading, error, onRetry, onRowClick,
-  exportFilename = 'export', emptyTitle = 'No records found',
-  emptyDescription, rowClassName, stickyHeader = true,
+/**
+ * Data table: sortable headers, pagination, CSV export, row links, sticky header, optional selection.
+ * Below 768 px rows render as stacked cards (title + status + amount, then key fields).
+ * Wide tables scroll inside their own container, never the page.
+ */
+export function DataTable<T>({
+  columns,
+  rows,
+  rowKey,
+  loading,
+  error,
+  onRetry,
+  rowHref,
+  onRowClick,
+  sort,
+  onSortChange,
+  page = 1,
+  pageSize,
+  total,
+  onPageChange,
+  empty = { title: 'Nothing to show' },
+  toolbar,
+  onExport,
+  selectable,
+  selected,
+  onSelectedChange,
+  isSelectable = () => true,
+  footer,
+  caption,
 }: DataTableProps<T>) {
-  const [localSort, setLocalSort] = useState<{ field: string; dir: 'asc' | 'desc' } | null>(null);
+  const router = useRouter();
+  const count = total ?? rows?.length ?? 0;
+  const pages = pageSize ? Math.max(1, Math.ceil(count / pageSize)) : 1;
+  const from = count === 0 ? 0 : (page - 1) * (pageSize ?? count) + 1;
+  const to = pageSize ? Math.min(count, page * pageSize) : count;
+  const selectableRows = (rows ?? []).filter(isSelectable);
+  const allSelected =
+    !!selectableRows.length && selectableRows.every((r) => selected?.has(rowKey(r)));
 
-  const totalPages = Math.ceil(total / pageSize);
-  const activeSort = sortField ? { field: sortField, dir: sortDir ?? 'asc' } : localSort;
-
-  function handleSort(field: string) {
-    if (!onSort) return;
-    const newDir = activeSort?.field === field && activeSort.dir === 'asc' ? 'desc' : 'asc';
-    setLocalSort({ field, dir: newDir });
-    onSort(field, newDir);
-  }
-
-  function handleExport() {
-    const headers = columns.map((c) => c.header).join(',');
-    const rows = data.map((row) =>
-      columns.map((c) => {
-        const val = row[c.key];
-        const str = String(val ?? '').replace(/,/g, ';');
-        return `"${str}"`;
-      }).join(',')
+  const toggleSort = (field: string) => {
+    if (!onSortChange) return;
+    onSortChange(
+      sort?.field === field
+        ? { field, dir: sort.dir === 'asc' ? 'desc' : 'asc' }
+        : { field, dir: 'asc' }
     );
-    const csv = [headers, ...rows].join('\n');
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${exportFilename}-${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-  }
+  };
+  const toggleRow = (id: string) => {
+    if (!onSelectedChange || !selected) return;
+    const next = new Set(selected);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    onSelectedChange(next);
+  };
+  const toggleAll = () => {
+    if (!onSelectedChange) return;
+    onSelectedChange(allSelected ? new Set() : new Set(selectableRows.map(rowKey)));
+  };
 
-  function SortIcon({ field }: { field: string }) {
-    if (!activeSort || activeSort.field !== field) return <ChevronsUpDown size={12} className="text-muted-foreground/50" />;
-    return activeSort.dir === 'asc' ? <ChevronUp size={12} className="text-accent" /> : <ChevronDown size={12} className="text-accent" />;
-  }
+  const cardCols = {
+    title: columns.find((c) => c.card === 'title') ?? columns[0],
+    status: columns.find((c) => c.card === 'status'),
+    amount: columns.find((c) => c.card === 'amount'),
+    fields: columns.filter((c) => (c.card ?? 'field') === 'field' && c !== columns[0]),
+  };
 
-  const pageNums: (number | '...')[] = [];
-  if (totalPages <= 7) {
-    for (let i = 1; i <= totalPages; i++) pageNums.push(i);
+  const rowLink = (r: T) => rowHref?.(r) ?? null;
+
+  let body: ReactNode;
+  if (error && !rows) {
+    body = <ErrorState error={error} onRetry={onRetry} />;
+  } else if (loading && !rows) {
+    body = (
+      <div role="status" aria-label="Loading" className="space-y-3 p-4">
+        {Array.from({ length: 6 }, (_, i) => (
+          <div key={i} className="flex gap-4">
+            <Skeleton className="h-4 w-28" />
+            <Skeleton className="h-4 flex-1" />
+            <Skeleton className="h-4 w-24" />
+          </div>
+        ))}
+      </div>
+    );
+  } else if (!rows || rows.length === 0) {
+    body = <EmptyState title={empty.title} description={empty.description} action={empty.action} />;
   } else {
-    pageNums.push(1);
-    if (page > 3) pageNums.push('...');
-    for (let i = Math.max(2, page - 1); i <= Math.min(totalPages - 1, page + 1); i++) pageNums.push(i);
-    if (page < totalPages - 2) pageNums.push('...');
-    pageNums.push(totalPages);
+    body = (
+      <>
+        {/* Cards below 768 px */}
+        <ul className="divide-y divide-border md:hidden">
+          {rows.map((r) => {
+            const id = rowKey(r);
+            const href = rowLink(r);
+            const inner = (
+              <div className="min-w-0 flex-1">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 font-medium">{cardCols.title.cell(r)}</div>
+                  {cardCols.amount ? (
+                    <div className="num shrink-0 text-right font-medium">
+                      {cardCols.amount.cell(r)}
+                    </div>
+                  ) : null}
+                </div>
+                {cardCols.status ? <div className="mt-1">{cardCols.status.cell(r)}</div> : null}
+                {cardCols.fields.length ? (
+                  <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1">
+                    {cardCols.fields.map((c) => (
+                      <div key={c.key} className="min-w-0">
+                        <dt className="text-[11px] text-muted">{c.cardLabel ?? c.header}</dt>
+                        <dd className="truncate text-[13px]">{c.cell(r)}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                ) : null}
+              </div>
+            );
+            return (
+              <li key={id} className="flex items-start gap-3 px-4 py-3">
+                {selectable ? (
+                  <input
+                    type="checkbox"
+                    aria-label="Select row"
+                    className="form-checkbox mt-1 h-5 w-5 rounded border-border-strong text-brand"
+                    disabled={!isSelectable(r)}
+                    checked={selected?.has(id) ?? false}
+                    onChange={() => toggleRow(id)}
+                  />
+                ) : null}
+                {href ? (
+                  <Link href={href} className="block min-w-0 flex-1">
+                    {inner}
+                  </Link>
+                ) : onRowClick ? (
+                  <button
+                    type="button"
+                    className="block min-w-0 flex-1 text-left"
+                    onClick={() => onRowClick(r)}
+                  >
+                    {inner}
+                  </button>
+                ) : (
+                  inner
+                )}
+              </li>
+            );
+          })}
+        </ul>
+
+        {/* Table from 768 px; scrolls inside its own container when wide */}
+        <div className="hidden max-h-[70vh] overflow-auto scrollbar-thin md:block">
+          <table className="w-full border-separate border-spacing-0 text-sm">
+            {caption ? <caption className="sr-only">{caption}</caption> : null}
+            <thead>
+              <tr>
+                {selectable ? (
+                  <th className="sticky top-0 z-10 w-10 border-b border-border bg-surface-2 px-3 py-2 text-left">
+                    <input
+                      type="checkbox"
+                      aria-label="Select all"
+                      className="form-checkbox h-4 w-4 rounded border-border-strong text-brand"
+                      checked={allSelected}
+                      onChange={toggleAll}
+                    />
+                  </th>
+                ) : null}
+                {columns.map((c) => {
+                  const active = !!sort && !!c.sortKey && sort.field === c.sortKey;
+                  return (
+                    <th
+                      key={c.key}
+                      scope="col"
+                      aria-sort={
+                        active ? (sort!.dir === 'asc' ? 'ascending' : 'descending') : undefined
+                      }
+                      className={cn(
+                        'sticky top-0 z-10 whitespace-nowrap border-b border-border bg-surface-2 px-3 py-2 text-xs font-semibold text-muted',
+                        c.align === 'right' ? 'text-right' : 'text-left',
+                        c.className
+                      )}
+                    >
+                      {c.sortKey && onSortChange ? (
+                        <button
+                          type="button"
+                          onClick={() => toggleSort(c.sortKey!)}
+                          className={cn(
+                            'inline-flex items-center gap-1 hover:text-fg',
+                            c.align === 'right' && 'flex-row-reverse'
+                          )}
+                        >
+                          {c.header}
+                          <Icon
+                            icon={
+                              active ? (sort!.dir === 'asc' ? ArrowUp : ArrowDown) : ChevronsUpDown
+                            }
+                            size={13}
+                            className={active ? 'text-fg' : 'opacity-60'}
+                          />
+                        </button>
+                      ) : (
+                        c.header
+                      )}
+                    </th>
+                  );
+                })}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => {
+                const id = rowKey(r);
+                const href = rowLink(r);
+                const clickable = !!href || !!onRowClick;
+                return (
+                  <tr
+                    key={id}
+                    className={cn('group', clickable && 'cursor-pointer hover:bg-surface-2')}
+                    onClick={(e) => {
+                      if ((e.target as HTMLElement).closest('a,button,input,label')) return;
+                      if (href) router.push(href);
+                      else onRowClick?.(r);
+                    }}
+                  >
+                    {selectable ? (
+                      <td className="border-b border-border px-3 py-2.5">
+                        <input
+                          type="checkbox"
+                          aria-label="Select row"
+                          className="form-checkbox h-4 w-4 rounded border-border-strong text-brand"
+                          disabled={!isSelectable(r)}
+                          checked={selected?.has(id) ?? false}
+                          onChange={() => toggleRow(id)}
+                        />
+                      </td>
+                    ) : null}
+                    {columns.map((c, ci) => (
+                      <td
+                        key={c.key}
+                        className={cn(
+                          'border-b border-border px-3 py-2.5 align-middle',
+                          c.align === 'right' && 'num whitespace-nowrap text-right',
+                          c.className
+                        )}
+                      >
+                        {ci === 0 && href ? (
+                          <Link href={href} className="font-medium hover:underline">
+                            {c.cell(r)}
+                          </Link>
+                        ) : (
+                          c.cell(r)
+                        )}
+                      </td>
+                    ))}
+                  </tr>
+                );
+              })}
+            </tbody>
+            {footer ? <tfoot>{footer}</tfoot> : null}
+          </table>
+        </div>
+      </>
+    );
   }
 
   return (
-    <div className="flex flex-col h-full">
-      {/* Table */}
-      <div className={`flex-1 overflow-auto scrollbar-thin ${stickyHeader ? 'relative' : ''}`}>
-        <table className="w-full text-sm border-collapse min-w-max">
-          <thead className={stickyHeader ? 'sticky top-0 z-10' : ''}>
-            <tr className="bg-secondary border-b border-border">
-              {columns.map((col) => (
-                <th
-                  key={`th-${col.key}`}
-                  className={`px-3 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide whitespace-nowrap
-                    ${col.align === 'right' ? 'text-right' : col.align === 'center' ? 'text-center' : 'text-left'}
-                    ${col.width ?? ''}
-                    ${col.sortable && onSort ? 'cursor-pointer select-none hover:text-foreground' : ''}`}
-                  onClick={col.sortable && onSort ? () => handleSort(col.key) : undefined}
-                >
-                  <span className="inline-flex items-center gap-1">
-                    {col.header}
-                    {col.sortable && onSort && <SortIcon field={col.key} />}
-                  </span>
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {loading ? (
-              <tr>
-                <td colSpan={columns.length} className="p-0">
-                  <TableSkeleton rows={pageSize > 10 ? 10 : pageSize} cols={columns.length} />
-                </td>
-              </tr>
-            ) : error ? (
-              <tr>
-                <td colSpan={columns.length}>
-                  <div className="flex flex-col items-center py-12 gap-3">
-                    <p className="text-sm text-red-600 font-medium">{error}</p>
-                    {onRetry && (
-                      <button onClick={onRetry} className="btn-secondary text-xs">
-                        Retry
-                      </button>
-                    )}
-                  </div>
-                </td>
-              </tr>
-            ) : data.length === 0 ? (
-              <tr>
-                <td colSpan={columns.length}>
-                  <EmptyState title={emptyTitle} description={emptyDescription} />
-                </td>
-              </tr>
-            ) : (
-              data.map((row, ri) => (
-                <tr
-                  key={`row-${row.id ?? ri}`}
-                  className={`border-b border-border transition-colors
-                    ${ri % 2 === 0 ? 'bg-card' : 'bg-background/50'}
-                    ${onRowClick ? 'cursor-pointer hover:bg-accent/5' : 'hover:bg-muted/30'}
-                    ${rowClassName ? rowClassName(row) : ''}`}
-                  onClick={onRowClick ? () => onRowClick(row) : undefined}
-                >
-                  {columns.map((col) => (
-                    <td
-                      key={`cell-${row.id ?? ri}-${col.key}`}
-                      className={`px-3 py-2.5 text-sm text-foreground whitespace-nowrap
-                        ${col.align === 'right' ? 'text-right tabular-nums' : col.align === 'center' ? 'text-center' : ''}`}
-                    >
-                      {col.render ? col.render(row[col.key], row) : String(row[col.key] ?? '—')}
-                    </td>
-                  ))}
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
-
-      {/* Pagination */}
-      <div className="flex items-center justify-between px-4 py-3 border-t border-border bg-card shrink-0 flex-wrap gap-2">
-        <div className="flex items-center gap-3">
-          <span className="text-xs text-muted-foreground">
-            {total === 0 ? 'No records' : `${((page - 1) * pageSize) + 1}–${Math.min(page * pageSize, total)} of ${total}`}
+    <div className="min-w-0 rounded-lg border border-border bg-surface">
+      {toolbar || onExport ? (
+        <div className="flex flex-col gap-2 border-b border-border p-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0 flex-1">{toolbar}</div>
+          {onExport ? (
+            <Button size="sm" icon={Download} onClick={onExport} disabled={!rows?.length}>
+              Export CSV
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+      {body}
+      {rows && rows.length > 0 && onPageChange && pageSize ? (
+        <div className="flex items-center justify-between gap-2 border-t border-border px-3 py-2 text-[13px] text-muted">
+          <span className="num">
+            {formatCount(from)}–{formatCount(to)} of {formatCount(count)}
           </span>
-          <div className="flex items-center gap-1.5">
-            <span className="text-xs text-muted-foreground">Rows:</span>
-            <select
-              value={pageSize}
-              onChange={(e) => { onPageSizeChange(Number(e.target.value)); onPageChange(1); }}
-              className="input-field py-1 text-xs w-16"
-            >
-              {PAGE_SIZE_OPTIONS.map((s) => (
-                <option key={`ps-${s}`} value={s}>{s}</option>
-              ))}
-            </select>
+          <div className="flex items-center gap-1">
+            <IconButton
+              icon={ChevronLeft}
+              label="Previous page"
+              disabled={page <= 1}
+              onClick={() => onPageChange(page - 1)}
+            />
+            <span className="num px-1">
+              {page} / {pages}
+            </span>
+            <IconButton
+              icon={ChevronRight}
+              label="Next page"
+              disabled={page >= pages}
+              onClick={() => onPageChange(page + 1)}
+            />
           </div>
         </div>
-        <div className="flex items-center gap-1">
-          <button
-            onClick={() => onPageChange(page - 1)}
-            disabled={page <= 1}
-            className="p-1.5 rounded-md text-muted-foreground hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-            aria-label="Previous page"
-          >
-            <ChevronLeft size={14} />
-          </button>
-          {pageNums.map((n, i) =>
-            n === '...' ? (
-              <span key={`ellipsis-${i}`} className="px-1 text-xs text-muted-foreground">…</span>
-            ) : (
-              <button
-                key={`page-${n}`}
-                onClick={() => onPageChange(n as number)}
-                className={`w-7 h-7 text-xs rounded-md transition-colors font-medium
-                  ${page === n ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted'}`}
-              >
-                {n}
-              </button>
-            )
-          )}
-          <button
-            onClick={() => onPageChange(page + 1)}
-            disabled={page >= totalPages}
-            className="p-1.5 rounded-md text-muted-foreground hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-            aria-label="Next page"
-          >
-            <ChevronRight size={14} />
-          </button>
-          <button
-            onClick={handleExport}
-            className="ml-2 p-1.5 rounded-md text-muted-foreground hover:bg-muted transition-colors"
-            title="Export CSV"
-            aria-label="Export to CSV"
-          >
-            <Download size={14} />
-          </button>
-        </div>
-      </div>
+      ) : null}
     </div>
   );
 }

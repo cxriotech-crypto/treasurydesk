@@ -1,113 +1,101 @@
-import Decimal from 'decimal.js';
+/**
+ * Display formatting. Money: ₦10,532,602.74 · compact ₦10.53M / ₦1.2B · dates 22-Sep-2026 ·
+ * date-time 22-Sep-2026 14:05 · durations 2h 14m.
+ */
+import { D, dec, type Num } from './money';
+import { isoDatePart, isoTimePart, parseIso, toLagosIso } from './dates';
 
-Decimal.set({ rounding: Decimal.ROUND_HALF_UP });
+export const NAIRA = '₦';
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-/** Format a money string or number as Nigerian Naira with ₦ symbol */
-export function formatNaira(value: string | number | null | undefined): string {
-  if (value === null || value === undefined || value === '') return '₦0.00';
-  try {
-    const d = new Decimal(value);
-    const abs = d.abs();
-    const formatted = abs.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-    return d.isNegative() ? `-₦${formatted}` : `₦${formatted}`;
-  } catch {
-    return '₦0.00';
-  }
+function group(intPart: string): string {
+  return intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 }
 
-/** Compact Naira: ₦10.53M, ₦450K, ₦2.1B */
-export function formatNairaCompact(value: string | number | null | undefined): string {
-  if (value === null || value === undefined || value === '') return '₦0';
-  try {
-    const d = new Decimal(value).abs();
-    const sign = new Decimal(value).isNegative() ? '-' : '';
-    if (d.gte(1_000_000_000)) {
-      return `${sign}₦${d.div(1_000_000_000).toFixed(2)}B`;
-    }
-    if (d.gte(1_000_000)) {
-      return `${sign}₦${d.div(1_000_000).toFixed(2)}M`;
-    }
-    if (d.gte(1_000)) {
-      return `${sign}₦${d.div(1_000).toFixed(1)}K`;
-    }
-    return `${sign}₦${d.toFixed(2)}`;
-  } catch {
-    return '₦0';
-  }
+/** 1234567.8 → "1,234,567.80" (no currency sign). */
+export function formatAmount(v: Num | null | undefined, dp = 2): string {
+  const d = dec(v).toDecimalPlaces(dp, D.ROUND_HALF_UP);
+  const neg = d.isNegative() && !d.isZero();
+  const [i, f] = d.abs().toFixed(dp).split('.');
+  return `${neg ? '-' : ''}${group(i)}${f ? `.${f}` : ''}`;
 }
 
-/** Format a YYYY-MM-DD string as 22-Sep-2026 */
-export function formatDate(dateStr: string | null | undefined): string {
-  if (!dateStr) return '—';
-  try {
-    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    const [year, month, day] = dateStr.split('-').map(Number);
-    return `${String(day).padStart(2, '0')}-${months[month - 1]}-${year}`;
-  } catch {
-    return dateStr ?? '—';
-  }
+/** "₦10,532,602.74" (negative: "-₦1,000.00"). */
+export function formatNaira(v: Num | null | undefined): string {
+  const s = formatAmount(v);
+  return s.startsWith('-') ? `-${NAIRA}${s.slice(1)}` : `${NAIRA}${s}`;
 }
 
-/** Format ISO timestamp as 22-Sep-2026 14:05 */
+/** Signed delta: "+₦1,000.00" / "-₦1,000.00" / "₦0.00". */
+export function formatNairaDelta(v: Num): string {
+  const d = dec(v);
+  if (d.isZero()) return formatNaira(0);
+  return d.isPositive() ? `+${formatNaira(d)}` : formatNaira(d);
+}
+
+function trimZeros(s: string): string {
+  return s.includes('.') ? s.replace(/\.?0+$/, '') : s;
+}
+
+/** Compact for tiles: ₦10.53M, ₦1.2B, ₦850K, ₦950. */
+export function formatNairaCompact(v: Num | null | undefined): string {
+  const d = dec(v);
+  const sign = d.isNegative() ? '-' : '';
+  const a = d.abs();
+  let body: string;
+  if (a.gte(1e12)) body = `${trimZeros(a.dividedBy(1e12).toFixed(2))}T`;
+  else if (a.gte(1e9)) body = `${trimZeros(a.dividedBy(1e9).toFixed(2))}B`;
+  else if (a.gte(1e6)) body = `${a.dividedBy(1e6).toFixed(2)}M`;
+  else if (a.gte(1e3)) body = `${trimZeros(a.dividedBy(1e3).toFixed(1))}K`;
+  else body = trimZeros(a.toFixed(2));
+  return `${sign}${NAIRA}${body}`;
+}
+
+export function formatRate(v: Num | null | undefined): string {
+  return `${trimZeros(dec(v).toFixed(2))}%`;
+}
+
+export function formatCount(n: number): string {
+  return group(String(Math.trunc(n)));
+}
+
+/** "2026-09-22" → "22-Sep-2026". */
+export function formatDate(date: string | null | undefined): string {
+  if (!date) return '—';
+  const d = date.length > 10 ? isoDatePart(date) : date;
+  const [y, m, day] = d.split('-');
+  return `${day}-${MONTHS[Number(m) - 1]}-${y}`;
+}
+
+/** ISO timestamp → "22-Sep-2026 14:05" (Lagos). */
 export function formatDateTime(iso: string | null | undefined): string {
   if (!iso) return '—';
-  try {
-    const d = new Date(iso);
-    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    const day = String(d.getDate()).padStart(2, '0');
-    const mon = months[d.getMonth()];
-    const year = d.getFullYear();
-    const hh = String(d.getHours()).padStart(2, '0');
-    const mm = String(d.getMinutes()).padStart(2, '0');
-    return `${day}-${mon}-${year} ${hh}:${mm}`;
-  } catch {
-    return iso;
-  }
+  return `${formatDate(isoDatePart(iso))} ${isoTimePart(iso)}`;
 }
 
-/** Format a percentage string */
-export function formatRate(value: string | number | null | undefined): string {
-  if (value === null || value === undefined || value === '') return '0.00%';
-  try {
-    return `${new Decimal(value).toFixed(2)}%`;
-  } catch {
-    return '0.00%';
-  }
+/** ISO timestamp → "14:05:22" (Lagos). */
+export function formatTime(iso: string | null | undefined, withSeconds = true): string {
+  if (!iso) return '—';
+  const t = toLagosIso(parseIso(iso)).slice(11, 19);
+  return withSeconds ? t : t.slice(0, 5);
 }
 
-/** Add days to a YYYY-MM-DD string, return YYYY-MM-DD */
-export function addDays(dateStr: string, days: number): string {
-  const [y, m, d] = dateStr.split('-').map(Number);
-  const date = new Date(y, m - 1, d);
-  date.setDate(date.getDate() + days);
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+/** Minutes → "2h 14m", "3d 4h", "45m". */
+export function formatDuration(totalMinutes: number): string {
+  const m = Math.max(0, Math.round(Math.abs(totalMinutes)));
+  const days = Math.floor(m / 1440);
+  const hours = Math.floor((m % 1440) / 60);
+  const mins = m % 60;
+  if (days > 0) return hours ? `${days}d ${hours}h` : `${days}d`;
+  if (hours > 0) return `${hours}h ${mins}m`;
+  return `${mins}m`;
 }
 
-/** Today as YYYY-MM-DD in Lagos time */
-export function todayLagos(): string {
-  const now = new Date();
-  // UTC+1
-  const lagosOffset = 60;
-  const lagosMs = now.getTime() + (lagosOffset - now.getTimezoneOffset()) * 60000;
-  const d = new Date(lagosMs);
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+export function monthLabel(date: string): string {
+  const [y, m] = date.split('-');
+  return `${MONTHS[Number(m) - 1]} ${y}`;
 }
 
-/** Now as ISO string with +01:00 */
-export function nowLagosISO(): string {
-  const now = new Date();
-  const lagosOffset = 60;
-  const lagosMs = now.getTime() + (lagosOffset - now.getTimezoneOffset()) * 60000;
-  const d = new Date(lagosMs);
-  const pad = (n: number) => String(n).padStart(2, '0');
-  const ms = String(d.getMilliseconds()).padStart(3, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${ms}+01:00`;
-}
-
-/** Truncate long strings */
-export function truncate(str: string, maxLen: number): string {
-  if (!str) return '';
-  return str.length > maxLen ? str.slice(0, maxLen) + '…' : str;
+export function monthShort(date: string): string {
+  return MONTHS[Number(date.split('-')[1]) - 1];
 }

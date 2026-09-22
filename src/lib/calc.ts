@@ -1,771 +1,732 @@
 /**
- * src/lib/calc.ts
- * ─────────────────────────────────────────────────────────────────────────────
- * Pure financial calculation functions.
- * • decimal.js everywhere — all inputs and outputs are strings.
- * • Every output rounded to 2 dp ROUND_HALF_UP.
- * • Policy rates/options come from settingsService so changing a setting
- *   changes results everywhere.
- * ─────────────────────────────────────────────────────────────────────────────
+ * Calculation engine — pure functions only.
+ *
+ * - Inputs and outputs are money strings; every output is rounded to 2 dp ROUND_HALF_UP.
+ * - Settings are passed in explicitly, so changing a setting changes every result.
+ * - Every figure comes with a human-readable formula using the real numbers (the "fx" hover).
  */
+import type { Settings } from '@/domain/types';
+import {
+  addDays,
+  daysBetween as dDaysBetween,
+  isBusinessDay,
+  isIsoDate,
+  isWeekend,
+  nextBusinessDay,
+} from './dates';
+import {
+  D,
+  dec,
+  gt,
+  gte,
+  isPositive,
+  isValidMoney,
+  lt,
+  sub,
+  add,
+  toMoney,
+  ZERO,
+  type Num,
+} from './money';
+import { formatDate, formatNaira, formatRate } from './format';
 
-import Decimal from 'decimal.js';
-import { getSettings } from '@/services/settingsService';
+export const DEFAULT_SETTINGS: Settings = {
+  whtRate: '10',
+  preliqChargeRate: '20',
+  transferFeeRate: '0.10',
+  dayCount: 365,
+  whtOnAnniversary: false,
+  whtBasisPreliq: 'AFTER_CHARGE',
+  partialPreliqInterest: 'NOT_PAID',
+  tpFeeMode: 'DEDUCT',
+  rolloverCInterest: 'PAY_OUT',
+  rolloverABasis: 'NET',
+  maturityHolidayRule: 'NEXT_BUSINESS_DAY',
+  slaHours: 8,
+  slaCutoff: '15:00',
+  demoLatencyMs: 400,
+  gapsFailureRate: 10,
+};
 
-Decimal.set({ rounding: Decimal.ROUND_HALF_UP, precision: 20 });
+export const MAX_TENOR_DAYS = 1825;
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function d(v: string | number): Decimal {
-  return new Decimal(v);
+/** A calculated figure and the formula that produced it. */
+export interface Fig {
+  value: string;
+  formula: string;
 }
 
-function fmt(v: Decimal): string {
-  return v.toDecimalPlaces(2, Decimal.ROUND_HALF_UP).toFixed(2);
-}
+export type Errors = Record<string, string>;
 
-// ─── 1. daysBetween ───────────────────────────────────────────────────────────
+const fig = (value: string, formula: string): Fig => ({ value, formula });
+const N = formatNaira;
+const R = (r: Num) => formatRate(r);
 
-/**
- * Actual calendar days between two "YYYY-MM-DD" date strings.
- * from is inclusive, to is exclusive (standard day-count convention).
- */
-export function daysBetween(from: string, to: string): number {
-  const msPerDay = 86_400_000;
-  const a = new Date(from).getTime();
-  const b = new Date(to).getTime();
-  return Math.round((b - a) / msPerDay);
-}
-
-// ─── 2. maturityDate ─────────────────────────────────────────────────────────
-
-export interface MaturityDateResult {
-  date: string;
-  adjusted: boolean;
-}
-
-function isWeekend(dateStr: string): boolean {
-  const d = new Date(dateStr);
-  const day = d.getUTCDay();
-  return day === 0 || day === 6;
-}
-
-function addCalendarDays(dateStr: string, n: number): string {
-  const d = new Date(dateStr);
-  d.setUTCDate(d.getUTCDate() + n);
-  return d.toISOString().slice(0, 10);
-}
-
-/**
- * Compute maturity date = effectiveDate + tenorDays.
- * If the result falls on a weekend or public holiday and rule = NEXT_BUSINESS_DAY,
- * advance to the next business day.
- */
-export function maturityDate(
-  effectiveDate: string,
-  tenorDays: number,
-  holidays: string[] = [],
-  rule?: string
-): MaturityDateResult {
-  const settings = getSettings();
-  const appliedRule = rule ?? settings['MATURITY_HOLIDAY_RULE'] ?? 'NEXT_BUSINESS_DAY';
-  const holidaySet = new Set(holidays);
-
-  let date = addCalendarDays(effectiveDate, tenorDays);
-  const original = date;
-
-  if (appliedRule === 'NEXT_BUSINESS_DAY') {
-    while (isWeekend(date) || holidaySet.has(date)) {
-      date = addCalendarDays(date, 1);
-    }
-  }
-
-  return { date, adjusted: date !== original };
-}
-
-// ─── 3. interest ─────────────────────────────────────────────────────────────
-
-/**
- * Simple interest: P × r/100 × days/dayCount
- */
-export function interest(
-  principal: string,
-  ratePct: string,
-  days: number,
-  dayCount?: number
-): string {
-  const settings = getSettings();
-  const dc = dayCount ?? Number(settings['DAY_COUNT'] ?? 365);
-  return fmt(d(principal).mul(d(ratePct).div(100)).mul(d(days).div(dc)));
-}
-
-// ─── 4. accruedInterest ──────────────────────────────────────────────────────
-
-export interface InvestmentForAccrual {
+/** Minimal view of an investment the calculations need. */
+export interface InvestmentTerms {
   principalAmt: string;
   intRate: string;
   effectiveDate: string;
+  tenorDays: number;
   maturityDate: string;
-  intPaidToDate?: string;
+  intPaidToDate: string;
+  nextAnnivDate?: string | null;
+  annivFreqDays?: number;
 }
 
-/**
- * Interest accrued from effectiveDate to min(asOfDate, maturityDate),
- * minus any interest already paid.
- */
+export interface CalcEnv {
+  settings: Settings;
+  holidays: string[];
+}
+
+// ─── Primitives ──────────────────────────────────────────────────────────────
+
+/** Actual days from → to. */
+export function daysBetween(from: string, to: string): number {
+  return dDaysBetween(from, to);
+}
+
+export interface MaturityDateResult {
+  date: string;
+  unadjusted: string;
+  adjusted: boolean;
+  reason: string | null;
+}
+
+/** effective + tenor; weekend/holiday moves to the next business day when rule = NEXT_BUSINESS_DAY. */
+export function maturityDate(
+  effectiveDate: string,
+  tenorDays: number,
+  holidays: string[],
+  rule: Settings['maturityHolidayRule']
+): MaturityDateResult {
+  const unadjusted = addDays(effectiveDate, tenorDays);
+  if (rule !== 'NEXT_BUSINESS_DAY' || isBusinessDay(unadjusted, holidays)) {
+    return { date: unadjusted, unadjusted, adjusted: false, reason: null };
+  }
+  const date = nextBusinessDay(unadjusted, holidays);
+  const why = isWeekend(unadjusted) ? 'falls on a weekend' : 'is a public holiday';
+  return {
+    date,
+    unadjusted,
+    adjusted: true,
+    reason: `${formatDate(unadjusted)} ${why}; moved to next business day ${formatDate(date)}`,
+  };
+}
+
+/** P × rate/100 × days / dayCount. */
+export function interest(principal: Num, rate: Num, days: number, dayCount: number): Fig {
+  const v = toMoney(dec(principal).times(dec(rate)).dividedBy(100).times(days).dividedBy(dayCount));
+  return fig(v, `${N(principal)} × ${R(rate)} × ${days} / ${dayCount} = ${N(v)}`);
+}
+
+/** Days of interest earned by asOf, capped at the contract tenor. */
+export function accruedDays(inv: InvestmentTerms, asOf: string): number {
+  return Math.max(0, Math.min(dDaysBetween(inv.effectiveDate, asOf), inv.tenorDays));
+}
+
+/** Interest from effective date to min(asOf, maturity) less interest already paid (floor 0). */
 export function accruedInterest(
-  investment: InvestmentForAccrual,
-  asOfDate: string
-): string {
-  const capDate = asOfDate < investment.maturityDate ? asOfDate : investment.maturityDate;
-  const days = daysBetween(investment.effectiveDate, capDate);
-  const gross = interest(investment.principalAmt, investment.intRate, days);
-  const paid = investment.intPaidToDate ?? '0';
-  return fmt(d(gross).minus(d(paid)));
+  inv: InvestmentTerms,
+  asOf: string,
+  settings: Settings
+): Fig & { days: number } {
+  const days = accruedDays(inv, asOf);
+  const gross = interest(inv.principalAmt, inv.intRate, days, settings.dayCount);
+  const paid = toMoney(inv.intPaidToDate);
+  const net = toMoney(D.max(dec(gross.value).minus(dec(paid)), 0));
+  const formula = dec(paid).isZero()
+    ? gross.formula
+    : `${N(inv.principalAmt)} × ${R(inv.intRate)} × ${days} / ${settings.dayCount} − paid ${N(paid)} = ${N(net)}`;
+  return { value: net, formula, days };
 }
 
-// ─── 5. wht ──────────────────────────────────────────────────────────────────
-
-export interface CustomerForWht {
-  isWhtExempt: boolean;
+/** WHT on an amount: 0 when the customer is exempt or WHT does not apply. */
+export function wht(amount: Num, whtExempt: boolean, applies: boolean, settings: Settings): Fig {
+  if (whtExempt) return fig(ZERO, 'Customer is WHT-exempt');
+  if (!applies) return fig(ZERO, 'WHT not applied');
+  const v = toMoney(dec(amount).times(dec(settings.whtRate)).dividedBy(100));
+  return fig(v, `${R(settings.whtRate)} × ${N(amount)} = ${N(v)}`);
 }
 
-/**
- * Withholding tax on an amount.
- * Returns '0.00' if customer is WHT-exempt or applies=false.
- */
-export function wht(
-  amount: string,
-  customer: CustomerForWht,
-  applies: boolean
-): string {
-  if (!applies || customer.isWhtExempt) return '0.00';
-  const settings = getSettings();
-  const rate = settings['WHT_RATE'] ?? '10';
-  return fmt(d(amount).mul(d(rate).div(100)));
+// ─── Validation (7.3) ────────────────────────────────────────────────────────
+
+export function validateAmount(v: string | undefined, label = 'Amount'): string | null {
+  if (!v || !isValidMoney(v)) return `${label} is required`;
+  if (!isPositive(v)) return `${label} must be greater than zero`;
+  return null;
 }
 
-// ─── 6. inflow ───────────────────────────────────────────────────────────────
+export function validateRate(v: string | undefined, label = 'Rate'): string | null {
+  if (v === undefined || v === '' || !/^\d+(\.\d{1,4})?$/.test(String(v)))
+    return `${label} is required`;
+  if (lt(v, 0) || gt(v, 100)) return `${label} must be between 0 and 100`;
+  return null;
+}
+
+export function validateTenor(v: number | undefined, label = 'Tenor'): string | null {
+  if (v === undefined || v === null || Number.isNaN(v)) return `${label} is required`;
+  if (!Number.isInteger(v) || v < 1 || v > MAX_TENOR_DAYS) return `${label} must be 1–1,825 days`;
+  return null;
+}
+
+export function validateAccountNo(v: string | undefined | null): string | null {
+  if (!v) return 'Account number is required';
+  if (!/^\d{10}$/.test(v)) return 'Account number must be exactly 10 digits';
+  return null;
+}
+
+export function validateTransferDate(
+  v: string | undefined,
+  today: string,
+  holidays: string[]
+): string | null {
+  if (!v || !isIsoDate(v)) return 'Date is required';
+  if (v < today) return 'Date cannot be in the past';
+  if (isWeekend(v)) return 'Date falls on a weekend';
+  if (holidays.includes(v)) return 'Date is a public holiday';
+  return null;
+}
+
+function collect(errors: Errors, key: string, msg: string | null) {
+  if (msg) errors[key] = msg;
+}
+
+// ─── Inflow ──────────────────────────────────────────────────────────────────
 
 export interface InflowInput {
   principal: string;
   rate: string;
   tenorDays: number;
   effectiveDate: string;
-  customer?: CustomerForWht;
+  whtExempt: boolean;
 }
 
 export interface InflowResult {
-  maturityDate: string;
-  projectedInterest: string;
-  wht: string;
-  netMaturityValue: string;
+  principal: Fig;
+  projectedInterest: Fig;
+  wht: Fig;
+  netMaturityValue: Fig;
+  maturity: MaturityDateResult;
+  errors: Errors;
 }
 
-/**
- * Project maturity values for a new inflow.
- */
-export function inflow(input: InflowInput): InflowResult {
-  const settings = getSettings();
-  const holidays: string[] = [];
-  const mat = maturityDate(input.effectiveDate, input.tenorDays, holidays);
-  const projInterest = interest(input.principal, input.rate, input.tenorDays);
-  const customer = input.customer ?? { isWhtExempt: false };
-  const whtAmt = wht(projInterest, customer, true);
-  const net = fmt(d(input.principal).plus(d(projInterest)).minus(d(whtAmt)));
+export function calcInflow(input: InflowInput, env: CalcEnv): InflowResult {
+  const { settings } = env;
+  const errors: Errors = {};
+  collect(errors, 'amount', validateAmount(input.principal, 'Principal'));
+  collect(errors, 'newRate', validateRate(input.rate));
+  collect(errors, 'newTenorDays', validateTenor(input.tenorDays));
+  const ok = !errors.amount && !errors.newRate && !errors.newTenorDays;
+  const P = ok ? toMoney(input.principal) : ZERO;
+  const tenor = ok ? input.tenorDays : 0;
+  const projectedInterest = interest(P, ok ? input.rate : 0, tenor, settings.dayCount);
+  const w = wht(projectedInterest.value, input.whtExempt, true, settings);
+  const net = add(P, projectedInterest.value, `-${w.value}`);
   return {
-    maturityDate: mat.date,
-    projectedInterest: projInterest,
-    wht: whtAmt,
-    netMaturityValue: net,
+    principal: fig(P, 'Amount received from customer'),
+    projectedInterest,
+    wht: w,
+    netMaturityValue: fig(
+      net,
+      `${N(P)} + ${N(projectedInterest.value)} − ${N(w.value)} = ${N(net)}`
+    ),
+    maturity: maturityDate(input.effectiveDate, tenor, env.holidays, settings.maturityHolidayRule),
+    errors,
   };
 }
 
-// ─── 7. maturityPayout ───────────────────────────────────────────────────────
+// ─── Maturity (termination) ──────────────────────────────────────────────────
 
-export interface InvestmentForPayout {
-  principalAmt: string;
-  intRate: string;
-  tenorDays: number;
-  customer?: CustomerForWht;
+export interface MaturityResult {
+  principal: Fig;
+  interest: Fig;
+  wht: Fig;
+  net: Fig;
+  errors: Errors;
 }
 
-export interface MaturityPayoutResult {
-  principal: string;
-  interest: string;
-  wht: string;
-  net: string;
-}
-
-/**
- * Full maturity payout breakdown.
- */
-export function maturityPayout(inv: InvestmentForPayout): MaturityPayoutResult {
-  const interestAmt = interest(inv.principalAmt, inv.intRate, inv.tenorDays);
-  const customer = inv.customer ?? { isWhtExempt: false };
-  const whtAmt = wht(interestAmt, customer, true);
-  const net = fmt(d(inv.principalAmt).plus(d(interestAmt)).minus(d(whtAmt)));
+export function calcMaturity(
+  inv: InvestmentTerms,
+  whtExempt: boolean,
+  env: CalcEnv
+): MaturityResult {
+  const { settings } = env;
+  const full = interest(inv.principalAmt, inv.intRate, inv.tenorDays, settings.dayCount);
+  const I = toMoney(D.max(dec(full.value).minus(dec(inv.intPaidToDate)), 0));
+  const iFormula = dec(inv.intPaidToDate).isZero()
+    ? full.formula
+    : `${full.formula.replace(/ = .*$/, '')} − paid ${N(inv.intPaidToDate)} = ${N(I)}`;
+  const w = wht(I, whtExempt, true, settings);
+  const net = add(inv.principalAmt, I, `-${w.value}`);
   return {
-    principal: fmt(d(inv.principalAmt)),
-    interest: interestAmt,
-    wht: whtAmt,
-    net,
+    principal: fig(toMoney(inv.principalAmt), 'Principal per Eazybankz'),
+    interest: fig(I, iFormula),
+    wht: w,
+    net: fig(net, `${N(inv.principalAmt)} + ${N(I)} − ${N(w.value)} = ${N(net)}`),
+    errors: {},
   };
 }
 
-// ─── 8. preliqFull ───────────────────────────────────────────────────────────
-
-export interface InvestmentForPreliq {
-  principalAmt: string;
-  intRate: string;
-  effectiveDate: string;
-  maturityDate: string;
-  intPaidToDate?: string;
-  customer?: CustomerForWht;
-}
+// ─── Pre-liquidation ─────────────────────────────────────────────────────────
 
 export interface PreliqFullResult {
-  accrued: string;
-  charge: string;
-  netInterest: string;
-  wht: string;
-  payout: string;
+  daysElapsed: number;
+  principal: Fig;
+  accrued: Fig;
+  charge: Fig;
+  netInterest: Fig;
+  wht: Fig;
+  payout: Fig;
+  errors: Errors;
 }
 
-/**
- * Full pre-liquidation at liqDate.
- * WHT basis controlled by WHT_BASIS_PRELIQ setting:
- *   AFTER_CHARGE  → WHT on netInterest (accrued - charge)
- *   BEFORE_CHARGE → WHT on accrued
- */
-export function preliqFull(
-  inv: InvestmentForPreliq,
-  liqDate: string
+export function calcPreliqFull(
+  inv: InvestmentTerms,
+  liquidationDate: string,
+  whtExempt: boolean,
+  env: CalcEnv
 ): PreliqFullResult {
-  const settings = getSettings();
-  const chargeRate = settings['PRELIQ_CHARGE_RATE'] ?? '20';
-  const whtBasis = settings['WHT_BASIS_PRELIQ'] ?? 'AFTER_CHARGE';
-
-  const accrued = accruedInterest(inv, liqDate);
-  const charge = fmt(d(accrued).mul(d(chargeRate).div(100)));
-  const netInt = fmt(d(accrued).minus(d(charge)));
-
-  const customer = inv.customer ?? { isWhtExempt: false };
-  const whtBase = whtBasis === 'AFTER_CHARGE' ? netInt : accrued;
-  const whtAmt = wht(whtBase, customer, true);
-
-  const payout = fmt(d(inv.principalAmt).plus(d(netInt)).minus(d(whtAmt)));
-
-  return { accrued, charge, netInterest: netInt, wht: whtAmt, payout };
+  const { settings } = env;
+  const errors: Errors = {};
+  if (!isIsoDate(liquidationDate)) errors.valueDate = 'Liquidation date is required';
+  else if (liquidationDate < inv.effectiveDate)
+    errors.valueDate = 'Liquidation date is before the effective date';
+  const ai = accruedInterest(inv, liquidationDate, settings);
+  const charge = toMoney(dec(ai.value).times(dec(settings.preliqChargeRate)).dividedBy(100));
+  const netInterest = sub(ai.value, charge);
+  const whtBase = settings.whtBasisPreliq === 'GROSS' ? ai.value : netInterest;
+  const w = wht(whtBase, whtExempt, true, settings);
+  const payout = add(inv.principalAmt, netInterest, `-${w.value}`);
+  return {
+    daysElapsed: ai.days,
+    principal: fig(toMoney(inv.principalAmt), 'Principal per Eazybankz'),
+    accrued: fig(ai.value, ai.formula),
+    charge: fig(charge, `${R(settings.preliqChargeRate)} × ${N(ai.value)} = ${N(charge)}`),
+    netInterest: fig(netInterest, `${N(ai.value)} − ${N(charge)} = ${N(netInterest)}`),
+    wht: w,
+    payout: fig(
+      payout,
+      `${N(inv.principalAmt)} + ${N(netInterest)} − ${N(w.value)} = ${N(payout)}`
+    ),
+    errors,
+  };
 }
 
-// ─── 9. preliqPartial ────────────────────────────────────────────────────────
+export interface PreliqPartialInput {
+  requested: string;
+  liquidationDate: string;
+  newRate?: string;
+  newTenorDays?: number;
+}
 
 export interface PreliqPartialResult {
-  accrued: string;
-  charge: string;
-  payout: string;
-  remaining: string;
-  rebookedPrincipal: string;
-  interestTreatment: string;
+  daysElapsed: number;
+  principal: Fig;
+  requested: Fig;
+  accrued: Fig;
+  charge: Fig;
+  payout: Fig;
+  remaining: Fig;
+  rebooked: Fig;
+  interestPaidOut: Fig; // PAID_OUT mode, else 0
+  interestWht: Fig;
+  totalPayout: Fig;
+  newRate: string;
+  newTenorDays: number;
+  newMaturity: MaturityDateResult;
+  projectedInterest: Fig;
+  policyNote: string;
+  errors: Errors;
 }
 
-/**
- * Partial pre-liquidation.
- * requested < principal; charge is on accrued interest.
- * rebookedPrincipal = remaining - charge.
- * Throws if requested >= principal or charge >= remaining.
- */
-export function preliqPartial(
-  inv: InvestmentForPreliq,
-  liqDate: string,
-  requested: string
+export function calcPreliqPartial(
+  inv: InvestmentTerms,
+  input: PreliqPartialInput,
+  whtExempt: boolean,
+  env: CalcEnv
 ): PreliqPartialResult {
-  const settings = getSettings();
-  const chargeRate = settings['PRELIQ_CHARGE_RATE'] ?? '20';
-  const interestTreatment = settings['PARTIAL_PRELIQ_INTEREST'] ?? 'NOT_PAID';
-
-  const reqD = d(requested);
-  const principalD = d(inv.principalAmt);
-
-  if (reqD.gte(principalD)) {
-    throw new Error('Requested amount must be less than principal');
+  const { settings } = env;
+  const errors: Errors = {};
+  collect(errors, 'amount', validateAmount(input.requested, 'Requested amount'));
+  if (!errors.amount && gte(input.requested, inv.principalAmt)) {
+    errors.amount = `Requested amount must be less than the principal ${N(inv.principalAmt)}`;
+  }
+  if (!isIsoDate(input.liquidationDate)) errors.valueDate = 'Liquidation date is required';
+  const Rq = errors.amount ? ZERO : toMoney(input.requested);
+  const ai = accruedInterest(inv, input.liquidationDate, settings);
+  const charge = toMoney(dec(ai.value).times(dec(settings.preliqChargeRate)).dividedBy(100));
+  const remaining = sub(inv.principalAmt, Rq);
+  let rebooked = sub(remaining, charge);
+  let rebookedFormula = `${N(remaining)} − ${N(charge)} = ${N(rebooked)}`;
+  if (!errors.amount && gte(charge, remaining)) {
+    errors.amount = `Charge ${N(charge)} is not covered by the remaining principal ${N(remaining)}`;
   }
 
-  const accrued = accruedInterest(inv, liqDate);
-  const charge = fmt(d(accrued).mul(d(chargeRate).div(100)));
-  const remaining = fmt(principalD.minus(reqD));
-  const rebookedPrincipal = fmt(d(remaining).minus(d(charge)));
-
-  if (d(charge).gte(d(remaining))) {
-    throw new Error('Charge exceeds remaining principal');
+  const iw = wht(ai.value, whtExempt, settings.partialPreliqInterest !== 'NOT_PAID', settings);
+  const netAi = sub(ai.value, iw.value);
+  let interestPaidOut = fig(ZERO, 'Interest not paid (policy: NOT_PAID)');
+  if (settings.partialPreliqInterest === 'PAID_OUT') {
+    interestPaidOut = fig(netAi, `${N(ai.value)} − ${N(iw.value)} = ${N(netAi)}`);
+  } else if (settings.partialPreliqInterest === 'CAPITALISED') {
+    rebooked = add(rebooked, netAi);
+    rebookedFormula = `${N(remaining)} − ${N(charge)} + ${N(netAi)} = ${N(rebooked)}`;
   }
+  const totalPayout = add(Rq, interestPaidOut.value);
+
+  const remainingTenor = dDaysBetween(input.liquidationDate, inv.maturityDate);
+  const newRate = input.newRate ?? inv.intRate;
+  const newTenorDays = input.newTenorDays ?? (remainingTenor > 0 ? remainingTenor : inv.tenorDays);
+  collect(errors, 'newRate', validateRate(newRate, 'New rate'));
+  collect(errors, 'newTenorDays', validateTenor(newTenorDays, 'New tenor'));
+  const newMaturity = maturityDate(
+    input.liquidationDate,
+    newTenorDays,
+    env.holidays,
+    settings.maturityHolidayRule
+  );
+  const projectedInterest = interest(
+    gt(rebooked, 0) ? rebooked : 0,
+    errors.newRate ? 0 : newRate,
+    errors.newTenorDays ? 0 : newTenorDays,
+    settings.dayCount
+  );
+
+  const policyNote = {
+    NOT_PAID:
+      'Current policy: accrued interest is not paid on partial pre-liquidation (SOP example).',
+    PAID_OUT: 'Current policy: accrued interest less WHT is paid out with the requested amount.',
+    CAPITALISED: 'Current policy: accrued interest less WHT is added to the rebooked principal.',
+  }[settings.partialPreliqInterest];
 
   return {
-    accrued,
-    charge,
-    payout: fmt(reqD),
-    remaining,
-    rebookedPrincipal,
-    interestTreatment,
+    daysElapsed: ai.days,
+    principal: fig(toMoney(inv.principalAmt), 'Principal per Eazybankz'),
+    requested: fig(Rq, 'Amount requested by the customer'),
+    accrued: fig(ai.value, ai.formula),
+    charge: fig(charge, `${R(settings.preliqChargeRate)} × ${N(ai.value)} = ${N(charge)}`),
+    payout: fig(Rq, `Requested amount = ${N(Rq)}`),
+    remaining: fig(remaining, `${N(inv.principalAmt)} − ${N(Rq)} = ${N(remaining)}`),
+    rebooked: fig(rebooked, rebookedFormula),
+    interestPaidOut,
+    interestWht: iw,
+    totalPayout: fig(totalPayout, `${N(Rq)} + ${N(interestPaidOut.value)} = ${N(totalPayout)}`),
+    newRate,
+    newTenorDays,
+    newMaturity,
+    projectedInterest,
+    policyNote,
+    errors,
   };
 }
 
-// ─── 10. anniversary ─────────────────────────────────────────────────────────
-
-export interface InvestmentForAnniversary {
-  principalAmt: string;
-  intRate: string;
-  effectiveDate: string;
-  customer?: CustomerForWht;
-}
+// ─── Anniversary ─────────────────────────────────────────────────────────────
 
 export interface AnniversaryResult {
-  periodInterest: string;
-  wht: string;
-  net: string;
-  nextAnniversaryDate: string;
+  period: number;
+  periodInterest: Fig;
+  wht: Fig;
+  net: Fig;
+  currentAnnivDate: string;
+  nextAnnivDate: string;
+  errors: Errors;
 }
 
-/**
- * Anniversary payment for a given periodDays.
- * WHT only applied if WHT_ON_ANNIVERSARY = 'true'.
- */
-export function anniversary(
-  inv: InvestmentForAnniversary,
-  periodDays: number
+export function calcAnniversary(
+  inv: InvestmentTerms,
+  period: number,
+  whtExempt: boolean,
+  env: CalcEnv
 ): AnniversaryResult {
-  const settings = getSettings();
-  const applyWht = settings['WHT_ON_ANNIVERSARY'] === 'true';
-
-  const periodInterest = interest(inv.principalAmt, inv.intRate, periodDays);
-  const customer = inv.customer ?? { isWhtExempt: false };
-  const whtAmt = wht(periodInterest, customer, applyWht);
-  const net = fmt(d(periodInterest).minus(d(whtAmt)));
-  const nextAnniversaryDate = addCalendarDays(inv.effectiveDate, periodDays);
-
-  return { periodInterest, wht: whtAmt, net, nextAnniversaryDate };
-}
-
-// ─── 11. rolloverA ───────────────────────────────────────────────────────────
-
-export interface InvestmentForRollover {
-  principalAmt: string;
-  intRate: string;
-  tenorDays: number;
-  effectiveDate: string;
-  maturityDate: string;
-  customer?: CustomerForWht;
-}
-
-export interface RolloverAResult {
-  principal: string;
-  interest: string;
-  wht: string;
-  rollAmount: string;
-  newMaturityDate: string;
-  projectedNewInterest: string;
-}
-
-/**
- * Rollover A: roll principal + interest (net or gross per ROLLOVER_A_BASIS).
- */
-export function rolloverA(
-  inv: InvestmentForRollover,
-  newRate: string,
-  newTenor: number,
-  newEffective: string
-): RolloverAResult {
-  const settings = getSettings();
-  const basis = settings['ROLLOVER_A_BASIS'] ?? 'NET';
-
-  const interestAmt = interest(inv.principalAmt, inv.intRate, inv.tenorDays);
-  const customer = inv.customer ?? { isWhtExempt: false };
-  const whtAmt = wht(interestAmt, customer, true);
-
-  let rollAmount =
-    basis === 'GROSS'
-      ? fmt(d(inv.principalAmt).plus(d(interestAmt)))
-      : fmt(d(inv.principalAmt).plus(d(interestAmt)).minus(d(whtAmt)));
-
-  const mat = maturityDate(newEffective, newTenor);
-  const projectedNewInterest = interest(rollAmount, newRate, newTenor);
-
+  const { settings } = env;
+  const errors: Errors = {};
+  if (![30, 60, 90].includes(period)) errors.annivPeriod = 'Period must be 30, 60 or 90 days';
+  const pi = interest(
+    inv.principalAmt,
+    inv.intRate,
+    errors.annivPeriod ? 0 : period,
+    settings.dayCount
+  );
+  const w = wht(pi.value, whtExempt, settings.whtOnAnniversary, settings);
+  const net = sub(pi.value, w.value);
+  const current = inv.nextAnnivDate ?? addDays(inv.effectiveDate, period);
   return {
-    principal: fmt(d(inv.principalAmt)),
-    interest: interestAmt,
-    wht: whtAmt,
-    rollAmount,
-    newMaturityDate: mat.date,
-    projectedNewInterest,
+    period,
+    periodInterest: pi,
+    wht:
+      w.formula === 'WHT not applied'
+        ? fig(ZERO, 'WHT not required on anniversary interest (policy)')
+        : w,
+    net: fig(net, `${N(pi.value)} − ${N(w.value)} = ${N(net)}`),
+    currentAnnivDate: current,
+    nextAnnivDate: addDays(current, period),
+    errors,
   };
 }
 
-// ─── 12. rolloverB ───────────────────────────────────────────────────────────
+// ─── Rollover ────────────────────────────────────────────────────────────────
 
-export interface RolloverBResult {
-  rollAmount: string;
-  payout: string;
-  newMaturityDate: string;
-  projectedNewInterest: string;
+export type RolloverLetter = 'A' | 'B' | 'C' | 'D';
+
+export interface RolloverInput {
+  letter: RolloverLetter;
+  newEffectiveDate: string;
+  newRate: string;
+  newTenorDays: number;
+  rollAmt?: string; // C: X
 }
 
-/**
- * Rollover B: roll principal only; pay out interest - WHT.
- */
-export function rolloverB(
-  inv: InvestmentForRollover,
-  newRate: string,
-  newTenor: number,
-  newEffective: string
-): RolloverBResult {
-  const interestAmt = interest(inv.principalAmt, inv.intRate, inv.tenorDays);
-  const customer = inv.customer ?? { isWhtExempt: false };
-  const whtAmt = wht(interestAmt, customer, true);
-  const payout = fmt(d(interestAmt).minus(d(whtAmt)));
-  let rollAmount = fmt(d(inv.principalAmt));
-  const mat = maturityDate(newEffective, newTenor);
-  const projectedNewInterest = interest(rollAmount, newRate, newTenor);
-
-  return { rollAmount, payout, newMaturityDate: mat.date, projectedNewInterest };
-}
-
-// ─── 13. rolloverD ───────────────────────────────────────────────────────────
-
-export interface RolloverDResult {
-  rollAmount: string;
-  payout: string;
-  newMaturityDate: string;
-  projectedNewInterest: string;
-}
-
-/**
- * Rollover D: same maths as Rollover B, different label.
- */
-export function rolloverD(
-  inv: InvestmentForRollover,
-  newRate: string,
-  newTenor: number,
-  newEffective: string
-): RolloverDResult {
-  return rolloverB(inv, newRate, newTenor, newEffective);
-}
-
-// ─── 14. rolloverC ───────────────────────────────────────────────────────────
-
-export interface RolloverCResult {
-  rollAmount: string;
-  principalPayout: string;
-  interestPayout: string;
-  totalPayout: string;
-  newMaturityDate: string;
-  projectedNewInterest: string;
-}
-
-/**
- * Rollover C: roll a portion (rollPrincipal) of principal.
- * If ROLLOVER_C_INTEREST = PAY_OUT: interest - WHT is paid out.
- * If ROLLOVER_C_INTEREST = CAPITALISE: interest is added to rollAmount.
- * Throws if rollPrincipal >= principal.
- */
-export function rolloverC(
-  inv: InvestmentForRollover,
-  rollPrincipal: string,
-  newRate: string,
-  newTenor: number,
-  newEffective: string
-): RolloverCResult {
-  const settings = getSettings();
-  const interestTreatment = settings['ROLLOVER_C_INTEREST'] ?? 'PAY_OUT';
-
-  const rollD = d(rollPrincipal);
-  const principalD = d(inv.principalAmt);
-
-  if (rollD.gte(principalD)) {
-    throw new Error('Roll principal must be less than total principal');
-  }
-
-  const interestAmt = interest(inv.principalAmt, inv.intRate, inv.tenorDays);
-  const customer = inv.customer ?? { isWhtExempt: false };
-  const whtAmt = wht(interestAmt, customer, true);
-  const netInterestAmt = fmt(d(interestAmt).minus(d(whtAmt)));
-
-  const principalPayout = fmt(principalD.minus(rollD));
-
-  let rollAmount: string;
-  let interestPayout: string;
-
-  if (interestTreatment === 'CAPITALISE') {
-    rollAmount = fmt(rollD.plus(d(netInterestAmt)));
-    interestPayout = '0.00';
-  } else {
-    rollAmount = fmt(rollD);
-    interestPayout = netInterestAmt;
-  }
-
-  const totalPayout = fmt(d(principalPayout).plus(d(interestPayout)));
-  const mat = maturityDate(newEffective, newTenor);
-  const projectedNewInterest = interest(rollAmount, newRate, newTenor);
-
-  return {
-    rollAmount,
-    principalPayout,
-    interestPayout,
-    totalPayout,
-    newMaturityDate: mat.date,
-    projectedNewInterest,
-  };
-}
-
-// ─── 15. thirdParty ──────────────────────────────────────────────────────────
-
-export interface ThirdPartyResult {
-  fee: string;
-  amountToBeneficiary: string;
-  totalDebit: string;
-}
-
-/**
- * Third-party transfer fee calculation.
- * isInternal = true → fee is 0.
- * TP_FEE_MODE = DEDUCT → fee deducted from amount (beneficiary gets less).
- * TP_FEE_MODE = ADD    → fee added on top (customer debited more).
- */
-export function thirdParty(amount: string, isInternal: boolean): ThirdPartyResult {
-  if (isInternal) {
-    return { fee: '0.00', amountToBeneficiary: fmt(d(amount)), totalDebit: fmt(d(amount)) };
-  }
-  const settings = getSettings();
-  const feeRate = settings['TRANSFER_FEE_RATE'] ?? '0.10';
-  const tpFeeMode = settings['TP_FEE_MODE'] ?? 'DEDUCT';
-
-  const fee = fmt(d(amount).mul(d(feeRate).div(100)));
-
-  let amountToBeneficiary: string;
-  let totalDebit: string;
-
-  if (tpFeeMode === 'DEDUCT') {
-    amountToBeneficiary = fmt(d(amount).minus(d(fee)));
-    totalDebit = fmt(d(amount));
-  } else {
-    amountToBeneficiary = fmt(d(amount));
-    totalDebit = fmt(d(amount).plus(d(fee)));
-  }
-
-  return { fee, amountToBeneficiary, totalDebit };
-}
-
-// ─── 16. transfer ────────────────────────────────────────────────────────────
-
-export interface TransferResult {
-  valid: boolean;
-  sourceAfter: string;
-  error?: string;
-}
-
-/**
- * Internal transfer validation.
- */
-export function transfer(sourceAvailable: string, amount: string): TransferResult {
-  const avail = d(sourceAvailable);
-  const amt = d(amount);
-  if (amt.lte(0)) {
-    return { valid: false, sourceAfter: fmt(avail), error: 'Amount must be greater than zero' };
-  }
-  if (amt.gt(avail)) {
-    return { valid: false, sourceAfter: fmt(avail), error: 'Insufficient funds' };
-  }
-  return { valid: true, sourceAfter: fmt(avail.minus(amt)) };
-}
-
-// ─── 17. reversalDiff ────────────────────────────────────────────────────────
-
-export interface ReversalDiffResult {
-  rateDelta: string;
-  tenorDelta: number;
-  amountDelta: string;
-  projectedInterestDelta: string;
-}
-
-export interface ReversalRecord {
-  principalAmt: string;
-  intRate: string;
-  tenorDays: number;
-  interestAmt: string;
-}
-
-/**
- * Compute deltas between original and corrected transaction records.
- */
-export function reversalDiff(
-  original: ReversalRecord,
-  corrected: ReversalRecord
-): ReversalDiffResult {
-  return {
-    rateDelta: fmt(d(corrected.intRate).minus(d(original.intRate))),
-    tenorDelta: corrected.tenorDays - original.tenorDays,
-    amountDelta: fmt(d(corrected.principalAmt).minus(d(original.principalAmt))),
-    projectedInterestDelta: fmt(d(corrected.interestAmt).minus(d(original.interestAmt))),
-  };
-}
-
-// ─── Legacy exports (backward compat with seed.ts and existing code) ──────────
-
-export function getCalcSettings() {
-  return getSettings();
-}
-
-export function calcInterest(
-  principal: string,
-  annualRate: string,
-  tenorDays: number,
-  dayCount = 365
-): string {
-  return interest(principal, annualRate, tenorDays, dayCount);
-}
-
-export function calcWHT(interestAmt: string, whtRate = '10'): string {
-  return fmt(d(interestAmt).mul(d(whtRate).div(100)));
-}
-
-export function calcNetInterest(interestAmt: string, whtRate = '10'): string {
-  const w = d(interestAmt).mul(d(whtRate).div(100));
-  return fmt(d(interestAmt).minus(w));
-}
-
-export function calcTotalPayout(principal: string, netInterest: string): string {
-  return fmt(d(principal).plus(d(netInterest)));
-}
-
-export function calcInvestment(
-  principal: string,
-  annualRate: string,
-  tenorDays: number,
-  whtRate = '10',
-  dayCount = 365
-): {
-  interestAmt: string;
-  withholdingTax: string;
-  netInterest: string;
-  totalPayout: string;
-} {
-  const interestAmt = calcInterest(principal, annualRate, tenorDays, dayCount);
-  const withholdingTax = calcWHT(interestAmt, whtRate);
-  const netInterest = calcNetInterest(interestAmt, whtRate);
-  const totalPayout = calcTotalPayout(principal, netInterest);
-  return { interestAmt, withholdingTax, netInterest, totalPayout };
-}
-
-export function calcPreliq(
-  principal: string,
-  annualRate: string,
-  daysElapsed: number,
-  preliqChargeRate = '20',
-  whtRate = '10',
-  whtBasis: 'AFTER_CHARGE' | 'BEFORE_CHARGE' = 'AFTER_CHARGE',
-  dayCount = 365
-): {
-  accruedInterest: string;
-  preliqCharge: string;
-  interestAfterCharge: string;
-  withholdingTax: string;
-  netInterest: string;
-  totalPayout: string;
-} {
-  const accruedInterest = calcInterest(principal, annualRate, daysElapsed, dayCount);
-  const preliqCharge = fmt(d(accruedInterest).mul(d(preliqChargeRate).div(100)));
-  const interestAfterCharge = fmt(d(accruedInterest).minus(d(preliqCharge)));
-  const whtBase = whtBasis === 'AFTER_CHARGE' ? interestAfterCharge : accruedInterest;
-  const withholdingTax = fmt(d(whtBase).mul(d(whtRate).div(100)));
-  const netInterest = fmt(d(interestAfterCharge).minus(d(withholdingTax)));
-  const totalPayout = calcTotalPayout(principal, netInterest);
-  return { accruedInterest, preliqCharge, interestAfterCharge, withholdingTax, netInterest, totalPayout };
-}
-
-export function calcAnniversaryPayment(
-  principal: string,
-  annualRate: string,
-  frequencyDays: number,
-  applyWht = false,
-  whtRate = '10',
-  dayCount = 365
-): {
-  grossInterest: string;
-  withholdingTax: string;
-  netPayment: string;
-} {
-  const grossInterest = calcInterest(principal, annualRate, frequencyDays, dayCount);
-  const withholdingTax = applyWht ? fmt(d(grossInterest).mul(d(whtRate).div(100))) : '0.00';
-  const netPayment = fmt(d(grossInterest).minus(d(withholdingTax)));
-  return { grossInterest, withholdingTax, netPayment };
+export interface RolloverResult {
+  principal: Fig;
+  interest: Fig;
+  wht: Fig;
+  netInterest: Fig;
+  rollAmt: Fig;
+  principalPayout: Fig;
+  interestPayout: Fig;
+  totalPayout: Fig;
+  newEffectiveDate: string;
+  newRate: string;
+  newTenorDays: number;
+  newMaturity: MaturityDateResult;
+  projectedInterest: Fig;
+  errors: Errors;
 }
 
 export function calcRollover(
-  principal: string,
-  interestAmt: string,
-  withholdingTax: string,
-  rolloverCInterest: 'PAY_OUT' | 'CAPITALISE' = 'PAY_OUT',
-  rolloverABasis: 'NET' | 'GROSS' = 'NET'
-): {
-  newPrincipal: string;
-  interestPaidOut: string;
-} {
-  const p = d(principal);
-  const intD = d(interestAmt);
-  const whtD = d(withholdingTax);
-  const netInterest = intD.minus(whtD);
-  if (rolloverCInterest === 'CAPITALISE') {
-    const addBack = rolloverABasis === 'NET' ? netInterest : intD;
-    return { newPrincipal: fmt(p.plus(addBack)), interestPaidOut: '0.00' };
+  inv: InvestmentTerms,
+  input: RolloverInput,
+  whtExempt: boolean,
+  env: CalcEnv
+): RolloverResult {
+  const { settings } = env;
+  const errors: Errors = {};
+  if (!isIsoDate(input.newEffectiveDate)) errors.valueDate = 'New effective date is required';
+  collect(errors, 'newRate', validateRate(input.newRate, 'New rate'));
+  collect(errors, 'newTenorDays', validateTenor(input.newTenorDays, 'New tenor'));
+
+  const ai = accruedInterest(inv, input.newEffectiveDate, settings);
+  const I = ai.value;
+  const w = wht(I, whtExempt, true, settings);
+  const netI = sub(I, w.value);
+  const P = toMoney(inv.principalAmt);
+  const zero = (why: string) => fig(ZERO, why);
+
+  let rollAmt: Fig;
+  let principalPayout = zero('No principal paid out');
+  let interestPayout = zero('No interest paid out');
+
+  switch (input.letter) {
+    case 'A':
+      rollAmt =
+        settings.rolloverABasis === 'NET'
+          ? fig(add(P, netI), `${N(P)} + ${N(I)} − ${N(w.value)} = ${N(add(P, netI))}`)
+          : fig(add(P, I), `${N(P)} + ${N(I)} = ${N(add(P, I))} (gross basis)`);
+      break;
+    case 'B':
+    case 'D':
+      rollAmt = fig(P, `Principal rolled = ${N(P)}`);
+      interestPayout = fig(netI, `${N(I)} − ${N(w.value)} = ${N(netI)}`);
+      break;
+    case 'C': {
+      collect(errors, 'rollAmt', validateAmount(input.rollAmt, 'Amount to roll'));
+      if (!errors.rollAmt && gte(input.rollAmt!, P)) {
+        errors.rollAmt = `Amount to roll must be less than the principal ${N(P)}`;
+      }
+      const X = errors.rollAmt ? ZERO : toMoney(input.rollAmt!);
+      const pp = sub(P, X);
+      principalPayout = fig(pp, `${N(P)} − ${N(X)} = ${N(pp)}`);
+      if (settings.rolloverCInterest === 'PAY_OUT') {
+        rollAmt = fig(X, `Amount rolled = ${N(X)}`);
+        interestPayout = fig(netI, `${N(I)} − ${N(w.value)} = ${N(netI)}`);
+      } else {
+        const ra = add(X, netI);
+        rollAmt = fig(ra, `${N(X)} + ${N(I)} − ${N(w.value)} = ${N(ra)}`);
+      }
+      break;
+    }
   }
-  return { newPrincipal: fmt(p), interestPaidOut: fmt(rolloverABasis === 'NET' ? netInterest : intD) };
+
+  const total = add(principalPayout.value, interestPayout.value);
+  const newMaturity = maturityDate(
+    input.newEffectiveDate,
+    errors.newTenorDays ? 0 : input.newTenorDays,
+    env.holidays,
+    settings.maturityHolidayRule
+  );
+  const projectedInterest = interest(
+    rollAmt.value,
+    errors.newRate ? 0 : input.newRate,
+    errors.newTenorDays ? 0 : input.newTenorDays,
+    settings.dayCount
+  );
+
+  return {
+    principal: fig(P, 'Principal per Eazybankz'),
+    interest: fig(I, ai.formula),
+    wht: w,
+    netInterest: fig(netI, `${N(I)} − ${N(w.value)} = ${N(netI)}`),
+    rollAmt,
+    principalPayout,
+    interestPayout,
+    totalPayout: fig(
+      total,
+      `${N(principalPayout.value)} + ${N(interestPayout.value)} = ${N(total)}`
+    ),
+    newEffectiveDate: input.newEffectiveDate,
+    newRate: input.newRate,
+    newTenorDays: input.newTenorDays,
+    newMaturity,
+    projectedInterest,
+    errors,
+  };
 }
 
-export function calcTransferFee(principal: string, transferFeeRate = '0.10'): string {
-  return fmt(d(principal).mul(d(transferFeeRate).div(100)));
+// ─── Third-party payment ─────────────────────────────────────────────────────
+
+export interface ThirdPartyResult {
+  amount: Fig;
+  fee: Fig;
+  toBeneficiary: Fig;
+  totalDebit: Fig;
+  errors: Errors;
 }
 
-export function isSlaBreached(
-  initiatedAt: string,
-  currentStatus: string,
-  slaCutoff = '15:00',
-  slaHours = 8
-): boolean {
-  const terminalStatuses = ['COMPLETED', 'REJECTED', 'CANCELLED', 'CONFIRMED', 'CLOSED'];
-  if (terminalStatuses.includes(currentStatus)) return false;
-  try {
-    const initiated = new Date(initiatedAt);
-    const now = new Date();
-    const diffHours = (now.getTime() - initiated.getTime()) / (1000 * 60 * 60);
-    return diffHours > slaHours;
-  } catch {
-    return false;
+export function calcThirdParty(
+  amount: string,
+  internal: boolean,
+  settings: Settings,
+  available?: string
+): ThirdPartyResult {
+  const errors: Errors = {};
+  collect(errors, 'amount', validateAmount(amount));
+  const A = errors.amount ? ZERO : toMoney(amount);
+  const fee = internal
+    ? fig(ZERO, 'Internal transfer – no charge')
+    : (() => {
+        const v = toMoney(dec(A).times(dec(settings.transferFeeRate)).dividedBy(100));
+        return fig(v, `${R(settings.transferFeeRate)} × ${N(A)} = ${N(v)}`);
+      })();
+  let toBeneficiary: Fig;
+  let totalDebit: Fig;
+  if (settings.tpFeeMode === 'DEDUCT') {
+    const tb = sub(A, fee.value);
+    toBeneficiary = fig(tb, `${N(A)} − ${N(fee.value)} = ${N(tb)}`);
+    totalDebit = fig(A, `Amount debited = ${N(A)} (charge deducted from payment)`);
+  } else {
+    const td = add(A, fee.value);
+    toBeneficiary = fig(A, `Beneficiary receives the full ${N(A)}`);
+    totalDebit = fig(td, `${N(A)} + ${N(fee.value)} = ${N(td)}`);
   }
+  if (!errors.amount && available !== undefined && gt(totalDebit.value, available)) {
+    errors.amount = `Total debit ${N(totalDebit.value)} exceeds available balance ${N(available)}`;
+  }
+  return { amount: fig(A, 'Amount instructed'), fee, toBeneficiary, totalDebit, errors };
 }
 
-export function isValidPrincipal(value: string): boolean {
-  try { return new Decimal(value).gt(0); } catch { return false; }
+// ─── Transfer ────────────────────────────────────────────────────────────────
+
+export interface TransferResult {
+  amount: Fig;
+  available: Fig;
+  sourceAfter: Fig;
+  valid: boolean;
+  errors: Errors;
 }
 
-export function isValidRate(value: string): boolean {
-  try {
-    const dv = new Decimal(value);
-    return dv.gt(0) && dv.lte(100);
-  } catch { return false; }
+export function calcTransfer(amount: string, available: string): TransferResult {
+  const errors: Errors = {};
+  collect(errors, 'amount', validateAmount(amount));
+  const A = errors.amount ? ZERO : toMoney(amount);
+  if (!errors.amount && gt(A, available)) {
+    errors.amount = `Amount exceeds available balance ${N(available)}`;
+  }
+  const after = sub(available, A);
+  return {
+    amount: fig(A, 'Amount instructed'),
+    available: fig(toMoney(available), 'Available balance per Eazybankz'),
+    sourceAfter: fig(after, `${N(available)} − ${N(A)} = ${N(after)}`),
+    valid: Object.keys(errors).length === 0,
+    errors,
+  };
 }
 
-export const DEFAULT_SETTINGS = {
-  WHT_RATE: '10',
-  PRELIQ_CHARGE_RATE: '20',
-  TRANSFER_FEE_RATE: '0.10',
-  DAY_COUNT: '365',
-  WHT_ON_ANNIVERSARY: 'false',
-  WHT_BASIS_PRELIQ: 'AFTER_CHARGE',
-  PARTIAL_PRELIQ_INTEREST: 'NOT_PAID',
-  TP_FEE_MODE: 'DEDUCT',
-  ROLLOVER_C_INTEREST: 'PAY_OUT',
-  ROLLOVER_A_BASIS: 'NET',
-  MATURITY_HOLIDAY_RULE: 'NEXT_BUSINESS_DAY',
-  SLA_CUTOFF: '15:00',
-  SLA_HOURS: '8',
-};
+// ─── Reversal ────────────────────────────────────────────────────────────────
+
+export interface BookingTerms {
+  amount: string;
+  rate: string;
+  tenorDays: number;
+  effectiveDate: string;
+}
+
+export interface ReversalResult {
+  original: {
+    amount: string;
+    rate: string;
+    tenorDays: number;
+    projectedInterest: Fig;
+    maturity: MaturityDateResult;
+  };
+  corrected: {
+    amount: string;
+    rate: string;
+    tenorDays: number;
+    projectedInterest: Fig;
+    maturity: MaturityDateResult;
+  };
+  deltaAmount: Fig;
+  deltaRate: string;
+  deltaTenor: number;
+  deltaInterest: Fig;
+  errors: Errors;
+}
+
+export function calcReversal(
+  original: BookingTerms,
+  corrected: BookingTerms,
+  env: CalcEnv
+): ReversalResult {
+  const { settings } = env;
+  const errors: Errors = {};
+  collect(errors, 'correctedAmount', validateAmount(corrected.amount, 'Corrected amount'));
+  collect(errors, 'correctedRate', validateRate(corrected.rate, 'Corrected rate'));
+  collect(errors, 'correctedTenorDays', validateTenor(corrected.tenorDays, 'Corrected tenor'));
+  const cAmt = errors.correctedAmount ? toMoney(original.amount) : toMoney(corrected.amount);
+  const cRate = errors.correctedRate ? original.rate : corrected.rate;
+  const cTenor = errors.correctedTenorDays ? original.tenorDays : corrected.tenorDays;
+  if (
+    Object.keys(errors).length === 0 &&
+    dec(cAmt).eq(dec(original.amount)) &&
+    dec(cRate).eq(dec(original.rate)) &&
+    cTenor === original.tenorDays
+  ) {
+    errors.correctedAmount = 'Change at least one of amount, rate or tenor';
+  }
+  const oI = interest(original.amount, original.rate, original.tenorDays, settings.dayCount);
+  const cI = interest(cAmt, cRate, cTenor, settings.dayCount);
+  const dA = sub(cAmt, original.amount);
+  const dI = sub(cI.value, oI.value);
+  const rule = settings.maturityHolidayRule;
+  return {
+    original: {
+      amount: toMoney(original.amount),
+      rate: original.rate,
+      tenorDays: original.tenorDays,
+      projectedInterest: oI,
+      maturity: maturityDate(original.effectiveDate, original.tenorDays, env.holidays, rule),
+    },
+    corrected: {
+      amount: cAmt,
+      rate: cRate,
+      tenorDays: cTenor,
+      projectedInterest: cI,
+      maturity: maturityDate(original.effectiveDate, cTenor, env.holidays, rule),
+    },
+    deltaAmount: fig(dA, `${N(cAmt)} − ${N(original.amount)} = ${N(dA)}`),
+    deltaRate: dec(cRate).minus(dec(original.rate)).toFixed(2),
+    deltaTenor: cTenor - original.tenorDays,
+    deltaInterest: fig(dI, `${N(cI.value)} − ${N(oI.value)} = ${N(dI)}`),
+    errors,
+  };
+}

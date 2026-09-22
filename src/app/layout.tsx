@@ -1,43 +1,36 @@
-import React from 'react';
 import type { Metadata, Viewport } from 'next';
-import { Plus_Jakarta_Sans } from 'next/font/google';
-import { Toaster } from 'sonner';
+import type { ReactNode } from 'react';
+import { Inter } from 'next/font/google';
+import { Toaster } from '@/components/ui/Toast';
+import { THEME_SCRIPT } from '@/components/theme';
 import '../styles/tailwind.css';
 
-const plusJakarta = Plus_Jakarta_Sans({
-  subsets: ['latin'],
-  weight: ['400', '500', '600', '700', '800'],
-  variable: '--font-plus-jakarta',
-  display: 'swap',
-});
+const inter = Inter({ subsets: ['latin'], variable: '--font-inter', display: 'swap' });
 
 export const viewport: Viewport = {
   width: 'device-width',
   initialScale: 1,
+  themeColor: [
+    { media: '(prefers-color-scheme: light)', color: '#fafafa' },
+    { media: '(prefers-color-scheme: dark)', color: '#09090b' },
+  ],
 };
 
 export const metadata: Metadata = {
-  title: 'TreasuryDesk — First Marina Trust Finance',
-  description:
-    'End-to-end treasury operations workflow for First Marina Trust Finance Company Limited — from customer instruction to investment confirmation.',
-  icons: { icon: [{ url: '/favicon.ico', type: 'image/x-icon' }] },
+  title: { default: 'TreasuryDesk', template: '%s · TreasuryDesk' },
+  description: 'Treasury operations workflow for First Marina Trust Finance Company Limited.',
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en" className={plusJakarta.variable}>
-      <body className={plusJakarta.className}>
+    <html lang="en" className={inter.variable} suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: THEME_SCRIPT }} />
+      </head>
+      <body className="min-h-screen font-sans antialiased">
         {children}
-        <Toaster
-          position="bottom-right"
-          richColors
-          toastOptions={{
-            style: { fontFamily: 'var(--font-plus-jakarta, Plus Jakarta Sans, sans-serif)' },
-          }}
-        />
-
-        <script type="module" async src="https://static.rocket.new/rocket-web.js?_cfg=https%3A%2F%2Ftreasuryde6161back.builtwithrocket.new&_be=https%3A%2F%2Fappanalytics.rocket.new&_v=0.1.20" />
-        <script type="module" defer src="https://static.rocket.new/rocket-shot.js?v=0.0.3" /></body>
+        <Toaster />
+      </body>
     </html>
   );
 }
