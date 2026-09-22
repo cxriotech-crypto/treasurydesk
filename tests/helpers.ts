@@ -37,10 +37,28 @@ export function collectConsoleErrors(page: Page): string[] {
   return errors;
 }
 
+/** Sign out if a session is already open (the app sends signed-in users away from /login). */
+export async function signOut(page: Page) {
+  const menu = page.getByRole('button', { name: /User menu/ });
+  if (!(await menu.isVisible().catch(() => false))) return;
+  await menu.click();
+  await page.getByRole('menuitem', { name: 'Sign out' }).click();
+  await expect(page).toHaveURL(/\/login/, { timeout: 20_000 });
+}
+
 /** Sign in through the UI (email + password, then the demo 2FA code). */
 export async function login(page: Page, role: keyof typeof DEMO) {
-  await page.goto('/login');
-  await page.getByLabel('Email').fill(DEMO[role]);
+  const email = page.getByLabel('Email');
+  const menu = page.getByRole('button', { name: /User menu/ });
+  // A live session bounces /login to the dashboard, so sign out and come back.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await page.goto('/login');
+    await expect(email.or(menu).first()).toBeVisible({ timeout: 20_000 });
+    await page.waitForTimeout(250); // let hydration run the redirect before deciding
+    if (await email.isVisible().catch(() => false)) break;
+    await signOut(page);
+  }
+  await email.fill(DEMO[role]);
   await page.getByLabel('Password').fill('demo');
   await page.getByRole('button', { name: 'Continue' }).click();
   await page.getByLabel('6-digit code').fill('123456');
