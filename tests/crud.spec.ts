@@ -127,15 +127,25 @@ test.describe('CRUD', () => {
     if (!(await logButton.count())) test.skip(true, 'no call-back waiting for this officer');
     await logButton.click();
     const dialog = page.getByRole('dialog');
-    for (const item of ['Amount confirmed', 'Instruction confirmed', 'Beneficiary confirmed', 'Purpose confirmed']) {
-      await dialog.getByRole('radiogroup', { name: item }).getByRole('radio', { name: 'Confirmed', exact: true }).click();
+    for (const item of [
+      'Amount confirmed',
+      'Instruction confirmed',
+      'Beneficiary confirmed',
+      'Purpose confirmed',
+    ]) {
+      await dialog
+        .getByRole('radiogroup', { name: item })
+        .getByRole('radio', { name: 'Confirmed', exact: true })
+        .click();
     }
     await dialog.getByRole('radio', { name: 'Confirmed', exact: true }).last().check();
     await dialog.getByRole('button', { name: 'Save call-back' }).click();
     await expect(page.getByText('Call-back confirmed')).toBeVisible({ timeout: 20_000 });
   });
 
-  test('changing a rate recalculates open drafts and the self-check still passes', async ({ page }) => {
+  test('changing a rate recalculates open drafts and the self-check still passes', async ({
+    page,
+  }) => {
     await login(page, 'ADM');
     await page.goto('/settings');
     await page.getByLabel('Pre-liquidation charge (%)').fill('25');
@@ -165,7 +175,9 @@ test.describe('CRUD', () => {
     await login(page, 'HT');
     await page.goto('/notifications');
     await page.getByRole('button', { name: 'Mark all read' }).click();
-    await expect(page.getByRole('button', { name: 'Mark all read' })).toBeDisabled({ timeout: 20_000 });
+    await expect(page.getByRole('button', { name: 'Mark all read' })).toBeDisabled({
+      timeout: 20_000,
+    });
     await switchTo(page, 'MD');
   });
 });

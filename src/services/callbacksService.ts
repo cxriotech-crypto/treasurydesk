@@ -93,7 +93,7 @@ export const mockCallbacksService: CallbacksService = {
         })
         .sort((a, b) => (a.slaDueAt ?? '').localeCompare(b.slaDueAt ?? ''));
     }),
-  log: (txnId, data) => run(() => wf.logCallback(ctx(['AO', 'TO']), txnId, data)),
+  log: (txnId, data) => run(() => wf.logCallback(ctx(['AO']), txnId, data)),
 };
 
 export const httpCallbacksService: CallbacksService = {

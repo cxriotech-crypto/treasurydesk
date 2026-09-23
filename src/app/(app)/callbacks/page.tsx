@@ -55,7 +55,8 @@ export default function CallbacksPage() {
     () => (logFor ? transactionsService.get(logFor) : Promise.resolve(null)),
     [logFor]
   );
-  const canLog = me?.roleCode === 'AO' || me?.roleCode === 'TO';
+  // SOP step 3: the customer's own Account Officer makes the call.
+  const canLog = me?.roleCode === 'AO';
 
   const columns: Column<CallbackRow>[] = [
     {
@@ -183,7 +184,7 @@ export default function CallbacksPage() {
                     size="sm"
                     icon={PhoneCall}
                     disabledReason={
-                      canLog ? null : 'Only Account Officers and Treasury Officers log calls'
+                      canLog ? null : 'The customer call-back is made by the Account Officer'
                     }
                     onClick={() => setLogFor(r.id)}
                   >

@@ -2,7 +2,16 @@ import { expect, test } from '@playwright/test';
 import { collectConsoleErrors, expectNoHorizontalScroll, login } from './helpers';
 
 const WIDTHS = [360, 375, 768, 1024, 1280, 1440, 1920];
-const PAGES = ['/dashboard', '/transactions', '/transactions/new', '/investments', '/customers', '/calendar', '/callbacks', '/notifications'];
+const PAGES = [
+  '/dashboard',
+  '/transactions',
+  '/transactions/new',
+  '/investments',
+  '/customers',
+  '/calendar',
+  '/callbacks',
+  '/notifications',
+];
 
 test.describe('Responsive layout', () => {
   test('no horizontal scroll from 360 px to 1920 px', async ({ page }) => {
@@ -49,7 +58,10 @@ test.describe('Responsive layout', () => {
       await page.goto('/dashboard');
       await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
       await page.waitForTimeout(600); // let the charts settle
-      await testInfo.attach(`dashboard-${width}`, { body: await page.screenshot({ fullPage: true }), contentType: 'image/png' });
+      await testInfo.attach(`dashboard-${width}`, {
+        body: await page.screenshot({ fullPage: true }),
+        contentType: 'image/png',
+      });
     }
   });
 });

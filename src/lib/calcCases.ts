@@ -298,6 +298,43 @@ export const CALC_CASES: CalcCase[] = [
     },
   },
   {
+    id: 'X10',
+    name: 'Withholding tax switched off for one transaction',
+    required: false,
+    run: () => {
+      const on = calcPreliqFull(inv(365), addDays(EFFECTIVE, 180), false, env());
+      const off = calcPreliqFull(inv(365), addDays(EFFECTIVE, 180), false, {
+        ...env(),
+        whtOn: false,
+      });
+      return [
+        L('WHT with the switch on', '59178.08', on.wht.value),
+        L('WHT with the switch off', '0.00', off.wht.value),
+        // The customer keeps the tax that is no longer deducted.
+        L('Payout with the switch off', '10591780.82', off.payout.value),
+        L('Charge is untouched', on.charge.value, off.charge.value),
+      ];
+    },
+  },
+  {
+    id: 'X11',
+    name: 'Pre-liquidation charge switched off for one transaction',
+    required: false,
+    run: () => {
+      const off = calcPreliqFull(inv(365), addDays(EFFECTIVE, 180), false, {
+        ...env(),
+        preliqChargeOn: false,
+      });
+      return [
+        L('Charge', '0.00', off.charge.value),
+        L('Net interest is the full accrual', '739726.03', off.netInterest.value),
+        // WHT is charged on the larger net interest: 10% × 739,726.03.
+        L('WHT', '73972.60', off.wht.value),
+        L('Payout', '10665753.43', off.payout.value),
+      ];
+    },
+  },
+  {
     id: 'X9',
     name: 'Amount in words',
     required: false,

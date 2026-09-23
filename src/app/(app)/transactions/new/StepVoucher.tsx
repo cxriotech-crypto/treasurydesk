@@ -12,7 +12,7 @@ import {
   type ScenarioCode,
 } from '@/domain/codes';
 import { formatNaira, formatRate } from '@/lib/format';
-import { transactionsService } from '@/services';
+import { settingsService, transactionsService } from '@/services';
 import { useCurrentUser, useData } from '@/services/useData';
 import { useDebounced } from '@/components/hooks';
 import {
@@ -25,6 +25,7 @@ import {
   Select,
   SignatureModal,
   SkeletonRows,
+  Switch,
   Tabs,
   Textarea,
   toast,
@@ -122,6 +123,7 @@ export function StepVoucher({ detail, goTo }: StepProps) {
   const debounced = useDebounced(input, 150);
   const key = JSON.stringify(clean(debounced));
   const comp = useData(() => transactionsService.preview(txn.id, clean(debounced)), [key]);
+  const settings = useData(() => settingsService.get(), []);
 
   const set = (k: Key, v: unknown) => setInput((i) => ({ ...i, [k]: v }));
   const errors = comp.data?.errors ?? {};
@@ -295,6 +297,12 @@ export function StepVoucher({ detail, goTo }: StepProps) {
   const ro = vouchers.find((v) => v.voucherType === 'RO');
   const fo = vouchers.find((v) => v.voucherType === 'FO');
 
+  // Deductions this voucher carries; each can be switched off for this transaction alone.
+  const hasRow = (prefix: string) =>
+    vouchers.some((v) => v.rows.some((r) => r.label.startsWith(prefix)));
+  const showWht = hasRow('WHT');
+  const showCharge = hasRow('Pre-liquidation charge');
+
   return (
     <div className="space-y-5">
       <section>
@@ -314,6 +322,31 @@ export function StepVoucher({ detail, goTo }: StepProps) {
             />
           </Field>
         </div>
+        {showWht || showCharge ? (
+          <div className="mt-4 rounded-md border border-border px-3">
+            {showWht ? (
+              <Switch
+                label="Deduct withholding tax"
+                description={
+                  detail.customer.whtExempt
+                    ? `${detail.customer.customerName} is WHT-exempt, so no tax is deducted.`
+                    : `Deduct ${formatRate(settings.data?.values.whtRate ?? '0')} withholding tax on the interest of this transaction.`
+                }
+                disabled={detail.customer.whtExempt}
+                checked={!detail.customer.whtExempt && input.whtOn !== false}
+                onChange={(v) => set('whtOn', v)}
+              />
+            ) : null}
+            {showCharge ? (
+              <Switch
+                label="Apply the pre-liquidation charge"
+                description={`Charge ${formatRate(settings.data?.values.preliqChargeRate ?? '0')} of the accrued interest for breaking the investment early.`}
+                checked={input.preliqChargeOn !== false}
+                onChange={(v) => set('preliqChargeOn', v)}
+              />
+            ) : null}
+          </div>
+        ) : null}
       </section>
 
       {hasErrors ? (

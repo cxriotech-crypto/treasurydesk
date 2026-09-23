@@ -5,7 +5,7 @@
  * - Settings are passed in explicitly, so changing a setting changes every result.
  * - Every figure comes with a human-readable formula using the real numbers (the "fx" hover).
  */
-import type { Settings } from '@/domain/types';
+import type { Rate, Settings } from '@/domain/types';
 import {
   addDays,
   daysBetween as dDaysBetween,
@@ -77,6 +77,19 @@ export interface InvestmentTerms {
 export interface CalcEnv {
   settings: Settings;
   holidays: string[];
+  /** Per-transaction switches (default on). Set from the transaction's own inputs. */
+  whtOn?: boolean;
+  preliqChargeOn?: boolean;
+}
+
+/** Withholding tax applies unless it is switched off on this transaction. */
+export function whtOn(env: CalcEnv): boolean {
+  return env.whtOn !== false;
+}
+
+/** The pre-liquidation charge applies unless it is switched off on this transaction. */
+export function chargeRateOf(env: CalcEnv): Rate {
+  return env.preliqChargeOn === false ? '0' : env.settings.preliqChargeRate;
 }
 
 // ─── Primitives ──────────────────────────────────────────────────────────────
@@ -221,7 +234,7 @@ export function calcInflow(input: InflowInput, env: CalcEnv): InflowResult {
   const P = ok ? toMoney(input.principal) : ZERO;
   const tenor = ok ? input.tenorDays : 0;
   const projectedInterest = interest(P, ok ? input.rate : 0, tenor, settings.dayCount);
-  const w = wht(projectedInterest.value, input.whtExempt, true, settings);
+  const w = wht(projectedInterest.value, input.whtExempt, whtOn(env), settings);
   const net = add(P, projectedInterest.value, `-${w.value}`);
   return {
     principal: fig(P, 'Amount received from customer'),
@@ -257,7 +270,7 @@ export function calcMaturity(
   const iFormula = dec(inv.intPaidToDate).isZero()
     ? full.formula
     : `${full.formula.replace(/ = .*$/, '')} − paid ${N(inv.intPaidToDate)} = ${N(I)}`;
-  const w = wht(I, whtExempt, true, settings);
+  const w = wht(I, whtExempt, whtOn(env), settings);
   const net = add(inv.principalAmt, I, `-${w.value}`);
   return {
     principal: fig(toMoney(inv.principalAmt), 'Principal per Eazybankz'),
@@ -293,16 +306,20 @@ export function calcPreliqFull(
   else if (liquidationDate < inv.effectiveDate)
     errors.valueDate = 'Liquidation date is before the effective date';
   const ai = accruedInterest(inv, liquidationDate, settings);
-  const charge = toMoney(dec(ai.value).times(dec(settings.preliqChargeRate)).dividedBy(100));
+  const charge = toMoney(
+    dec(ai.value)
+      .times(dec(chargeRateOf(env)))
+      .dividedBy(100)
+  );
   const netInterest = sub(ai.value, charge);
   const whtBase = settings.whtBasisPreliq === 'GROSS' ? ai.value : netInterest;
-  const w = wht(whtBase, whtExempt, true, settings);
+  const w = wht(whtBase, whtExempt, whtOn(env), settings);
   const payout = add(inv.principalAmt, netInterest, `-${w.value}`);
   return {
     daysElapsed: ai.days,
     principal: fig(toMoney(inv.principalAmt), 'Principal per Eazybankz'),
     accrued: fig(ai.value, ai.formula),
-    charge: fig(charge, `${R(settings.preliqChargeRate)} × ${N(ai.value)} = ${N(charge)}`),
+    charge: fig(charge, `${R(chargeRateOf(env))} × ${N(ai.value)} = ${N(charge)}`),
     netInterest: fig(netInterest, `${N(ai.value)} − ${N(charge)} = ${N(netInterest)}`),
     wht: w,
     payout: fig(
@@ -355,7 +372,11 @@ export function calcPreliqPartial(
   if (!isIsoDate(input.liquidationDate)) errors.valueDate = 'Liquidation date is required';
   const Rq = errors.amount ? ZERO : toMoney(input.requested);
   const ai = accruedInterest(inv, input.liquidationDate, settings);
-  const charge = toMoney(dec(ai.value).times(dec(settings.preliqChargeRate)).dividedBy(100));
+  const charge = toMoney(
+    dec(ai.value)
+      .times(dec(chargeRateOf(env)))
+      .dividedBy(100)
+  );
   const remaining = sub(inv.principalAmt, Rq);
   let rebooked = sub(remaining, charge);
   let rebookedFormula = `${N(remaining)} − ${N(charge)} = ${N(rebooked)}`;
@@ -363,7 +384,12 @@ export function calcPreliqPartial(
     errors.amount = `Charge ${N(charge)} is not covered by the remaining principal ${N(remaining)}`;
   }
 
-  const iw = wht(ai.value, whtExempt, settings.partialPreliqInterest !== 'NOT_PAID', settings);
+  const iw = wht(
+    ai.value,
+    whtExempt,
+    whtOn(env) && settings.partialPreliqInterest !== 'NOT_PAID',
+    settings
+  );
   const netAi = sub(ai.value, iw.value);
   let interestPaidOut = fig(ZERO, 'Interest not paid (policy: NOT_PAID)');
   if (settings.partialPreliqInterest === 'PAID_OUT') {
@@ -404,7 +430,7 @@ export function calcPreliqPartial(
     principal: fig(toMoney(inv.principalAmt), 'Principal per Eazybankz'),
     requested: fig(Rq, 'Amount requested by the customer'),
     accrued: fig(ai.value, ai.formula),
-    charge: fig(charge, `${R(settings.preliqChargeRate)} × ${N(ai.value)} = ${N(charge)}`),
+    charge: fig(charge, `${R(chargeRateOf(env))} × ${N(ai.value)} = ${N(charge)}`),
     payout: fig(Rq, `Requested amount = ${N(Rq)}`),
     remaining: fig(remaining, `${N(inv.principalAmt)} − ${N(Rq)} = ${N(remaining)}`),
     rebooked: fig(rebooked, rebookedFormula),
@@ -447,7 +473,7 @@ export function calcAnniversary(
     errors.annivPeriod ? 0 : period,
     settings.dayCount
   );
-  const w = wht(pi.value, whtExempt, settings.whtOnAnniversary, settings);
+  const w = wht(pi.value, whtExempt, whtOn(env) && settings.whtOnAnniversary, settings);
   const net = sub(pi.value, w.value);
   const current = inv.nextAnnivDate ?? addDays(inv.effectiveDate, period);
   return {
@@ -507,7 +533,7 @@ export function calcRollover(
 
   const ai = accruedInterest(inv, input.newEffectiveDate, settings);
   const I = ai.value;
-  const w = wht(I, whtExempt, true, settings);
+  const w = wht(I, whtExempt, whtOn(env), settings);
   const netI = sub(I, w.value);
   const P = toMoney(inv.principalAmt);
   const zero = (why: string) => fig(ZERO, why);

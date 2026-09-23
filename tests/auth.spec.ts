@@ -6,8 +6,12 @@ test.describe('Sign-in and access', () => {
     const errors = collectConsoleErrors(page);
     for (const role of Object.keys(DEMO) as (keyof typeof DEMO)[]) {
       await login(page, role);
-      await expect(page.getByRole('button', { name: new RegExp(`User menu for ${NAMES[role]}`) })).toBeVisible();
-      await expect(page.getByRole('heading', { level: 1 })).toContainText(/Good (morning|afternoon|evening)/);
+      await expect(
+        page.getByRole('button', { name: new RegExp(`User menu for ${NAMES[role]}`) })
+      ).toBeVisible();
+      await expect(page.getByRole('heading', { level: 1 })).toContainText(
+        /Good (morning|afternoon|evening)/
+      );
       await page.getByRole('button', { name: /User menu/ }).click();
       await page.getByRole('menuitem', { name: 'Sign out' }).click();
       await expect(page).toHaveURL(/\/login/);
@@ -66,7 +70,9 @@ test.describe('Sign-in and access', () => {
       s.lastActivityAt = new Date(Date.now() - 15.5 * 60000).toISOString();
       localStorage.setItem('treasurydesk.session.v1', JSON.stringify(s));
     });
-    await expect(page.getByRole('dialog', { name: 'Are you still there?' })).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByRole('dialog', { name: 'Are you still there?' })).toBeVisible({
+      timeout: 10_000,
+    });
     await page.evaluate(() => {
       const s = JSON.parse(localStorage.getItem('treasurydesk.session.v1')!);
       s.lastActivityAt = new Date(Date.now() - 17.5 * 60000).toISOString();

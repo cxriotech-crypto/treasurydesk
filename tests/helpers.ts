@@ -63,14 +63,23 @@ export async function login(page: Page, role: keyof typeof DEMO) {
   await page.getByRole('button', { name: 'Continue' }).click();
   await page.getByLabel('6-digit code').fill('123456');
   await page.getByRole('button', { name: 'Verify and sign in' }).click();
-  await expect(page).toHaveURL(/\/(dashboard|transactions|approvals|operations)/, { timeout: 20_000 });
+  await expect(page).toHaveURL(/\/(dashboard|transactions|approvals|operations)/, {
+    timeout: 20_000,
+  });
 }
 
 /** Switch demo user from the user menu (keeps the same page where allowed). */
 export async function switchTo(page: Page, role: keyof typeof DEMO) {
+  await switchToName(page, NAMES[role]);
+}
+
+/** Switch to a demo user by their full name (e.g. the Account Officer a customer belongs to). */
+export async function switchToName(page: Page, fullName: string) {
   await page.getByRole('button', { name: /User menu/ }).click();
-  await page.getByRole('menuitem', { name: NAMES[role] }).click();
-  await expect(page.getByRole('button', { name: new RegExp(`User menu for ${NAMES[role]}`) })).toBeVisible();
+  await page.getByRole('menuitem', { name: fullName }).click(); // the item also shows the role
+  await expect(
+    page.getByRole('button', { name: new RegExp(`User menu for ${fullName}`) })
+  ).toBeVisible();
 }
 
 /** Fill and submit the signature dialog. */
@@ -84,7 +93,9 @@ export async function sign(page: Page, role: keyof typeof DEMO, action = 'Approv
 
 /** No horizontal page scroll at the current viewport. */
 export async function expectNoHorizontalScroll(page: Page) {
-  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  const overflow = await page.evaluate(
+    () => document.documentElement.scrollWidth - document.documentElement.clientWidth
+  );
   expect(overflow, 'page should not scroll horizontally').toBeLessThanOrEqual(1);
 }
 

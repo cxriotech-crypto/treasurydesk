@@ -1,8 +1,20 @@
 import { expect, test } from '@playwright/test';
-import { collectConsoleErrors, fastDemo, login, sign, switchTo } from './helpers';
+import {
+  NAMES,
+  collectConsoleErrors,
+  fastDemo,
+  login,
+  sign,
+  switchTo,
+  switchToName,
+} from './helpers';
 
 /** Walks the wizard up to the voucher step for the scenario given, and returns the reference. */
-async function buildToVoucher(page: import('@playwright/test').Page, type: RegExp, scenario: RegExp) {
+async function buildToVoucher(
+  page: import('@playwright/test').Page,
+  type: RegExp,
+  scenario: RegExp
+) {
   await page.goto('/transactions/new');
   await page.getByRole('radio', { name: type }).click();
   await page.getByRole('radio', { name: scenario }).click();
@@ -23,11 +35,18 @@ async function buildToVoucher(page: import('@playwright/test').Page, type: RegEx
     }
   }
   const needsSubject = await page.locator('[aria-label="Subject"]').count();
-  expect(needsSubject === 0 || picked, 'a customer with an eligible subject was found').toBeTruthy();
+  expect(
+    needsSubject === 0 || picked,
+    'a customer with an eligible subject was found'
+  ).toBeTruthy();
 
   await page.getByRole('button', { name: /Create draft and continue|Continue/ }).click();
-  await expect(page.getByRole('heading', { name: /2\. Instruction/ })).toBeVisible({ timeout: 20_000 });
-  const ref = (await page.getByRole('heading', { level: 1 }).textContent())!.trim();
+  await expect(page.getByRole('heading', { name: /2\. Instruction/ })).toBeVisible({
+    timeout: 20_000,
+  });
+  const ref = (await page.getByRole('heading', { level: 1 }).textContent())!.match(
+    /TRX-\d{4}-\d+/
+  )![0];
 
   // Step 2 – instruction
   const amount = page.getByLabel('Amount on the instruction');
@@ -37,18 +56,49 @@ async function buildToVoucher(page: import('@playwright/test').Page, type: RegEx
 
   // Step 3 – signature
   await expect(page.getByRole('heading', { name: /3\. Signature/ })).toBeVisible();
-  for (const label of ['Signature matches the specimen', 'Signed according to the mandate', 'Account ownership confirmed', 'Instruction is complete']) {
+  for (const label of [
+    'Signature matches the specimen',
+    'Signed according to the mandate',
+    'Account ownership confirmed',
+    'Instruction is complete',
+  ]) {
     await page.getByLabel(label).check();
   }
   await page.getByRole('button', { name: 'Verified, continue' }).click();
 
-  // Step 4 – call-back
+  // Step 4 – the call-back belongs to the customer's Account Officer (SOP step 3).
   await expect(page.getByRole('heading', { name: /4\. Call-back/ })).toBeVisible();
-  for (const item of ['Amount confirmed', 'Instruction confirmed', 'Beneficiary confirmed', 'Purpose confirmed']) {
-    await page.getByRole('radiogroup', { name: item }).getByRole('radio', { name: 'Confirmed', exact: true }).click();
+  await expect(page.getByText('Waiting for the Account Officer')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Save call-back' })).toHaveCount(0);
+  const draftUrl = page.url();
+  const intro = (await page
+    .locator('main p', { hasText: /calls .* and confirms/ })
+    .first()
+    .textContent())!;
+  const officer = intro.match(/^(.*?) calls /)![1].trim();
+
+  await switchToName(page, officer);
+  await page.goto('/callbacks');
+  await page.locator('main li', { hasText: ref }).getByRole('button', { name: 'Log call' }).click();
+  const call = page.getByRole('dialog');
+  for (const item of [
+    'Amount confirmed',
+    'Instruction confirmed',
+    'Beneficiary confirmed',
+    'Purpose confirmed',
+  ]) {
+    await call
+      .getByRole('radiogroup', { name: item })
+      .getByRole('radio', { name: 'Confirmed', exact: true })
+      .click();
   }
-  await page.getByRole('radio', { name: 'Confirmed', exact: true }).last().check();
-  await page.getByRole('button', { name: 'Save call-back' }).click();
+  await call.getByRole('radio', { name: 'Confirmed', exact: true }).last().check();
+  await call.getByRole('button', { name: 'Save call-back' }).click();
+  await expect(page.getByText('Call-back confirmed')).toBeVisible({ timeout: 20_000 });
+
+  // Back to the maker to finish the voucher.
+  await switchToName(page, NAMES.TO);
+  await page.goto(draftUrl);
 
   // Step 5 – Eazybankz
   await expect(page.getByRole('heading', { name: /5\. Eazybankz/ })).toBeVisible();
@@ -71,10 +121,21 @@ test.describe('Transaction flows', () => {
     await login(page, 'TO');
 
     const ref = await buildToVoucher(page, /Pre-liquidation/, /Partial/);
-    await expect(page.getByText('Pre-liquidation charge')).toBeVisible();
+    await expect(page.getByText(/Pre-liquidation charge \(20%\)/)).toBeVisible();
+
+    // The two deductions can be switched off for this transaction alone, then back on.
+    const charge = page.getByRole('switch', { name: 'Apply the pre-liquidation charge' });
+    await charge.click();
+    await expect(page.getByText('Pre-liquidation charge (switched off)')).toBeVisible();
+    await charge.click();
+    await expect(page.getByText(/Pre-liquidation charge \(20%\)/)).toBeVisible();
+    // Interest is not paid out on a partial pre-liquidation, so there is no tax to switch.
+    await expect(page.getByRole('switch', { name: 'Deduct withholding tax' })).toHaveCount(0);
     await page.getByRole('button', { name: 'Sign & submit' }).click();
     await sign(page, 'TO', 'Sign & submit');
-    await expect(page.getByText('Awaiting Head Treasury', { exact: true }).first()).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByText('Awaiting Head Treasury', { exact: true }).first()).toBeVisible({
+      timeout: 20_000,
+    });
 
     // Maker cannot approve their own transaction.
     await expect(page.getByRole('button', { name: 'Approve & sign' })).toHaveCount(0);
@@ -106,17 +167,24 @@ test.describe('Transaction flows', () => {
 
     // Operations execute, Treasury confirms.
     await switchTo(page, 'OPS');
-    await page.getByRole('button', { name: /^Execute$/ }).first().click();
+    await page
+      .getByRole('button', { name: /^Execute$/ })
+      .first()
+      .click();
     const drawer = page.getByRole('dialog');
     await drawer.getByRole('button', { name: 'Use demo reference' }).click();
     await drawer.getByRole('button', { name: /Mark executed|Send to GAPS/ }).click();
-    await expect(drawer.getByText('Executed', { exact: true }).first()).toBeVisible({ timeout: 30_000 });
+    await expect(drawer.getByText('Executed', { exact: true }).first()).toBeVisible({
+      timeout: 30_000,
+    });
     await drawer.getByRole('button', { name: 'Close' }).first().click();
 
     await switchTo(page, 'TO');
     await page.getByRole('button', { name: 'Confirm completion' }).click();
     await page.getByRole('dialog').getByRole('button', { name: 'Confirm completion' }).click();
-    await expect(page.getByText('Completed', { exact: true }).first()).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByText('Completed', { exact: true }).first()).toBeVisible({
+      timeout: 20_000,
+    });
 
     // Every control passed.
     await page.getByRole('tab', { name: /Controls/ }).click();
@@ -137,9 +205,14 @@ test.describe('Transaction flows', () => {
     await page.getByLabel('Purpose').fill('Stop test');
     await page.getByRole('button', { name: 'Save instruction and continue' }).click();
     await page.getByRole('button', { name: 'Signature differs — stop processing' }).click();
-    await page.getByRole('dialog').getByLabel('What differs').fill('Signature does not match the specimen');
+    await page
+      .getByRole('dialog')
+      .getByLabel('What differs')
+      .fill('Signature does not match the specimen');
     await page.getByRole('dialog').getByRole('button', { name: 'Stop processing' }).click();
-    await expect(page.getByText('Stopped – signature mismatch').first()).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByText('Stopped – signature mismatch').first()).toBeVisible({
+      timeout: 20_000,
+    });
   });
 
   test('GAPS failure is reported and the retry succeeds', async ({ page }) => {
@@ -168,7 +241,9 @@ test.describe('Transaction flows', () => {
     const retry = page.getByRole('dialog');
     await retry.getByRole('button', { name: 'Use demo reference' }).click();
     await retry.getByRole('button', { name: /Retry GAPS submission|Send to GAPS/ }).click();
-    await expect(retry.getByText('Executed', { exact: true }).first()).toBeVisible({ timeout: 40_000 });
+    await expect(retry.getByText('Executed', { exact: true }).first()).toBeVisible({
+      timeout: 40_000,
+    });
   });
 
   test('approvers can bulk approve with one signature', async ({ page }) => {
@@ -183,6 +258,26 @@ test.describe('Transaction flows', () => {
     await expect(page.getByText('2 approved')).toBeVisible({ timeout: 20_000 });
   });
 
+  test('withholding tax can be switched off on a maturity voucher', async ({ page }) => {
+    await fastDemo(page);
+    await login(page, 'TO');
+    await buildToVoucher(page, /Termination at maturity/, /Principal \+ interest/);
+    const tax = page.getByRole('switch', { name: /Deduct withholding tax/ });
+    await expect(tax).toBeVisible();
+
+    if (await tax.isDisabled()) {
+      // A WHT-exempt customer: the switch is locked off and the voucher says why.
+      await expect(page.getByText('WHT (exempt)')).toBeVisible();
+      await expect(page.getByText(/is WHT-exempt, so no tax/)).toBeVisible();
+      return;
+    }
+    await expect(page.getByText('WHT', { exact: true })).toBeVisible();
+    await tax.click();
+    await expect(page.getByText('WHT (switched off)')).toBeVisible();
+    await tax.click();
+    await expect(page.getByText('WHT', { exact: true })).toBeVisible();
+  });
+
   test('the printed voucher shows the figures, words and signatures', async ({ page }) => {
     await fastDemo(page);
     await login(page, 'TO');
@@ -194,7 +289,9 @@ test.describe('Transaction flows', () => {
       page.getByRole('link', { name: 'Print voucher' }).first().click(),
     ]);
     await printPage.waitForLoadState();
-    await expect(printPage.getByText('FIRST MARINA TRUST FINANCE COMPANY LIMITED')).toBeVisible({ timeout: 20_000 });
+    await expect(printPage.getByText('FIRST MARINA TRUST FINANCE COMPANY LIMITED')).toBeVisible({
+      timeout: 20_000,
+    });
     await expect(printPage.getByText('AMOUNT IN WORDS')).toBeVisible();
     await expect(printPage.getByText('TREASURY OFFICER')).toBeVisible();
     await expect(printPage.getByText('MANAGING DIRECTOR')).toBeVisible();

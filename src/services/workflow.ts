@@ -573,6 +573,14 @@ export function verifySignature(ctx: Ctx, txnId: string, checks: SignatureChecks
       'STEP',
       'signature step completed'
     );
+    // The customer call-back is the Account Officer's step — tell them it is waiting.
+    const customer = getById(db, 'customers', t.customerId, 'customer');
+    notify(db, ctx, {
+      targetUserId: customer.accountOfficerId,
+      title: `Call-back due: ${t.txnRef}`,
+      body: `Call ${customer.customerName} on ${customer.regPhone} to confirm the instruction.`,
+      link: link(t),
+    });
     return t;
   });
 }
@@ -614,23 +622,31 @@ export type CallbackData = Omit<
 
 export function logCallback(ctx: Ctx, txnId: string, data: CallbackData): CallbackLog {
   return mutate((db) => {
-    const u = actor(db, ctx, ['TO', 'AO']);
+    // SOP step 3: the Account Officer calls the customer on the registered number.
+    const u = actor(db, ctx, ['AO']);
     const t = txnOf(db, txnId);
     requireStatus(t, ['VERIFICATION', 'RETURNED']);
     requireControls(db, t.id, ['C02']);
     const customer = getById(db, 'customers', t.customerId, 'customer');
-    if (u.roleCode === 'AO' && customer.accountOfficerId !== u.id) {
+    if (customer.accountOfficerId !== u.id) {
       throw new AppError(
         'Account Officers can only log call-backs for their own customers.',
         'FORBIDDEN'
       );
     }
-    if (u.roleCode === 'TO') requireMaker(t, u);
     const officer = findById(db, 'users', data.officerId);
     if (!officer)
       throw new AppError('Officer is required.', 'VALIDATION', {
         officerId: 'Officer is required',
       });
+    if (officer.id !== u.id)
+      throw new AppError(
+        'The call-back is recorded against the officer who made the call.',
+        'VALIDATION',
+        {
+          officerId: 'You can only record a call you made yourself',
+        }
+      );
     const errors: Record<string, string> = {};
     if (!data.phoneCalled.trim()) errors.phoneCalled = 'Phone number is required';
     if (!isIsoDate(data.callDate)) errors.callDate = 'Date is required';

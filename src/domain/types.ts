@@ -145,6 +145,9 @@ export interface TxnInput {
   annivPeriod?: 30 | 60 | 90;
   // third party / transfer
   beneficiaryId?: string;
+  // per-transaction switches (undefined = on)
+  whtOn?: boolean; // deduct withholding tax on this transaction
+  preliqChargeOn?: boolean; // apply the pre-liquidation charge on this transaction
   // reversal corrected values
   correctedRate?: Rate;
   correctedTenorDays?: number;

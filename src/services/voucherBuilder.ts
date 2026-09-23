@@ -28,6 +28,7 @@ import {
   calcThirdParty,
   calcTransfer,
   validateTransferDate,
+  whtOn,
   type CalcEnv,
   type Errors,
   type Fig,
@@ -204,6 +205,20 @@ function payDate(c: TxnCalcContext, env: CalcEnv, earliest?: string): string {
   return c.txn.input.valueDate ? base : nextBusinessDay(base, env.holidays);
 }
 
+/** Row label for withholding tax: says when it is exempt or switched off for this transaction. */
+function whtLabel(exempt: boolean, env: CalcEnv, base = 'WHT'): string {
+  if (exempt) return `${base} (exempt)`;
+  if (!whtOn(env)) return `${base} (switched off)`;
+  return base;
+}
+
+/** Row label for the pre-liquidation charge, showing the rate actually applied. */
+function chargeLabel(env: CalcEnv): string {
+  return env.preliqChargeOn === false
+    ? 'Pre-liquidation charge (switched off)'
+    : `Pre-liquidation charge (${env.settings.preliqChargeRate}%)`;
+}
+
 function requireInv(c: TxnCalcContext): Investment {
   if (!c.investment) throw new Error('Investment is required for this scenario');
   return c.investment;
@@ -211,9 +226,11 @@ function requireInv(c: TxnCalcContext): Investment {
 
 // ─── Builder ─────────────────────────────────────────────────────────────────
 
-export function computeTxn(c: TxnCalcContext, env: CalcEnv): TxnComputation {
+export function computeTxn(c: TxnCalcContext, baseEnv: CalcEnv): TxnComputation {
   const s = c.txn.scenarioCode;
   const i = c.txn.input;
+  // The transaction's own withholding-tax and pre-liquidation-charge switches (default on).
+  const env: CalcEnv = { ...baseEnv, whtOn: i.whtOn, preliqChargeOn: i.preliqChargeOn };
   const exempt = c.customer.whtExempt;
   const purpose = c.instruction?.purpose ?? '';
   const withPurpose = (r: string) => [r, purpose].filter(Boolean).join('. ');
@@ -260,7 +277,7 @@ export function computeTxn(c: TxnCalcContext, env: CalcEnv): TxnComputation {
           input('Effective date', eff, 'date'),
           maturityRow('Maturity date', r.maturity),
           money('Projected interest', r.projectedInterest),
-          money(exempt ? 'WHT (exempt)' : 'WHT', r.wht),
+          money(whtLabel(exempt, env), r.wht),
           total('Net maturity value', r.netMaturityValue),
         ],
       });
@@ -291,7 +308,7 @@ export function computeTxn(c: TxnCalcContext, env: CalcEnv): TxnComputation {
           info('Investment', inv.investmentRef),
           money('Principal', r.principal, 'input'),
           money('Interest', r.interest),
-          money(exempt ? 'WHT (exempt)' : 'WHT', r.wht),
+          money(whtLabel(exempt, env), r.wht),
           total('Net payable', r.net),
           input('Transfer date', date, 'date'),
         ],
@@ -325,9 +342,9 @@ export function computeTxn(c: TxnCalcContext, env: CalcEnv): TxnComputation {
           info('Days elapsed', String(r.daysElapsed), 'days'),
           money('Principal', r.principal, 'input'),
           money('Accrued interest', r.accrued),
-          money(`Pre-liquidation charge (${env.settings.preliqChargeRate}%)`, r.charge),
+          money(chargeLabel(env), r.charge),
           money('Net interest', r.netInterest),
-          money(exempt ? 'WHT (exempt)' : 'WHT', r.wht),
+          money(whtLabel(exempt, env), r.wht),
           total('Payout', r.payout),
         ],
       });
@@ -377,11 +394,11 @@ export function computeTxn(c: TxnCalcContext, env: CalcEnv): TxnComputation {
           money('Principal', r.principal, 'input'),
           money('Requested amount', r.requested, 'input'),
           money('Accrued interest', r.accrued),
-          money(`Pre-liquidation charge (${env.settings.preliqChargeRate}%)`, r.charge),
+          money(chargeLabel(env), r.charge),
           money('Payout', r.payout),
           ...(env.settings.partialPreliqInterest === 'PAID_OUT'
             ? [
-                money('WHT on interest', r.interestWht),
+                money(whtLabel(exempt, env, 'WHT on interest'), r.interestWht),
                 money('Interest paid out', r.interestPaidOut),
               ]
             : []),
@@ -454,7 +471,7 @@ export function computeTxn(c: TxnCalcContext, env: CalcEnv): TxnComputation {
           input('Period', String(period), 'days'),
           info('Anniversary date', r.currentAnnivDate, 'date'),
           money('Period interest', r.periodInterest),
-          money(exempt ? 'WHT (exempt)' : 'WHT', r.wht),
+          money(whtLabel(exempt, env), r.wht),
           total('Net interest payable', r.net),
           info('Next anniversary date', r.nextAnnivDate, 'date'),
           input('Transfer date', date, 'date'),
@@ -503,7 +520,7 @@ export function computeTxn(c: TxnCalcContext, env: CalcEnv): TxnComputation {
           info('Investment', inv.investmentRef),
           money('Principal', r.principal, 'input'),
           ...(letter === 'A'
-            ? [money('Interest', r.interest), money(exempt ? 'WHT (exempt)' : 'WHT', r.wht)]
+            ? [money('Interest', r.interest), money(whtLabel(exempt, env), r.wht)]
             : []),
           ...(letter === 'C' ? [money('Amount to roll', r.rollAmt, 'input')] : []),
           total('Roll-over amount', r.rollAmt),
@@ -542,7 +559,7 @@ export function computeTxn(c: TxnCalcContext, env: CalcEnv): TxnComputation {
             info('Investment', inv.investmentRef),
             ...(letter === 'C' ? [money('Principal paid out', r.principalPayout)] : []),
             money('Interest', r.interest),
-            money(exempt ? 'WHT (exempt)' : 'WHT', r.wht),
+            money(whtLabel(exempt, env), r.wht),
             ...(letter === 'C' ? [money('Interest paid out', r.interestPayout)] : []),
             total('Net payable', r.totalPayout),
             input('Transfer date', fo.transferDate, 'date'),
@@ -663,7 +680,7 @@ export function computeTxn(c: TxnCalcContext, env: CalcEnv): TxnComputation {
           input('Tenor', String(i.newTenorDays ?? ''), 'days'),
           maturityRow('Maturity date', inf.maturity),
           money('Projected interest', inf.projectedInterest),
-          money(exempt ? 'WHT (exempt)' : 'WHT', inf.wht),
+          money(whtLabel(exempt, env), inf.wht),
           total('Net maturity value', inf.netMaturityValue)
         );
         v.remarks = withPurpose(

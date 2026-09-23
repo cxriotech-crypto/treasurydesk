@@ -111,6 +111,8 @@ export interface NamedAudit extends AuditEvent {
 export interface TxnDetail {
   txn: TreasuryTxn;
   customer: Customer;
+  /** The customer's Account Officer — they make the SOP step 3 call-back. */
+  accountOfficerName: string;
   maker: AppUser;
   investment: Investment | null;
   sourceAccount: Account | null;
@@ -308,9 +310,7 @@ export function actionsFor(db: Db, t: TreasuryTxn, u: AppUser | null): TxnAction
   else if (u.roleCode === 'AO') {
     const cust = findById(db, 'customers', t.customerId);
     if (cust?.accountOfficerId !== u.id) callbackWhy = 'Not your customer';
-  } else if (u.roleCode === 'TO') {
-    if (!isMaker) callbackWhy = 'Only the maker or the Account Officer can log this call';
-  } else callbackWhy = 'Only Account Officers and Treasury Officers log call-backs';
+  } else callbackWhy = 'The customer call-back is made by the Account Officer';
 
   return {
     continueDraft: makerOnly(editable, 'Transaction is no longer editable'),
@@ -397,6 +397,10 @@ function detail(db: Db, id: string): TxnDetail {
   return {
     txn: t,
     customer: getById(db, 'customers', t.customerId, 'customer'),
+    accountOfficerName: userName(
+      db,
+      getById(db, 'customers', t.customerId, 'customer').accountOfficerId
+    ),
     maker: getById(db, 'users', t.makerId, 'user'),
     investment: findById(db, 'investments', t.investmentId) ?? null,
     sourceAccount: findById(db, 'accounts', t.sourceAccountId) ?? null,
@@ -512,7 +516,7 @@ export const mockTransactionsService: TransactionsService = {
   recordInstruction: (id, data) => run(() => wf.recordInstruction(ctx(['TO']), id, data)),
   verifySignature: (id, checks) => run(() => wf.verifySignature(ctx(['TO']), id, checks)),
   stop: (id, reason) => run(() => wf.stopForSignatureMismatch(ctx(['TO']), id, reason)),
-  logCallback: (id, data) => run(() => wf.logCallback(ctx(['TO', 'AO']), id, data)),
+  logCallback: (id, data) => run(() => wf.logCallback(ctx(['AO']), id, data)),
 
   refreshFromCbs: (id) =>
     run(() => {

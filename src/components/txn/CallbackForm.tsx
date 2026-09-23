@@ -1,13 +1,13 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 import { PhoneCall } from 'lucide-react';
 import type { CallbackLog, Customer } from '@/domain/types';
 import { CALLBACK_OUTCOME_LABELS, type CallbackOutcome } from '@/domain/codes';
 import { isoDatePart, isoTimePart, nowIso } from '@/lib/dates';
 import { formatDateTime } from '@/lib/format';
-import { AppError, callbacksService, usersService } from '@/services';
-import { useCurrentUser, useData } from '@/services/useData';
+import { AppError, callbacksService } from '@/services';
+import { useCurrentUser } from '@/services/useData';
 import type { NamedCallback } from '@/services/transactionsService';
 import {
   Badge,
@@ -18,7 +18,6 @@ import {
   Input,
   RadioGroup,
   Segmented,
-  Select,
   Textarea,
   TimeInput,
   toast,
@@ -75,17 +74,12 @@ export function CallbackForm({
   onSaved?: (log: CallbackLog) => void;
 }) {
   const me = useCurrentUser();
-  const aos = useData(
-    () => usersService.list({ filters: { roleCode: 'AO', status: 'ACTIVE' } }),
-    []
-  );
   const now = nowIso();
   const [phone, setPhone] = useState(customer.regPhone);
   const [date, setDate] = useState(isoDatePart(now));
   const [time, setTime] = useState(isoTimePart(now));
-  const [officerId, setOfficerId] = useState(
-    me?.roleCode === 'AO' ? me.id : customer.accountOfficerId
-  );
+  // SOP step 3: the call is made by the customer's own Account Officer, so the officer is fixed.
+  const officerId = me?.id ?? customer.accountOfficerId;
   const [checks, setChecks] = useState<Record<(typeof CHECKS)[number][0], YN>>({
     amountOk: '',
     instrOk: '',
@@ -98,15 +92,6 @@ export function CallbackForm({
   const [busy, setBusy] = useState(false);
 
   const allYes = CHECKS.every(([k]) => checks[k] === 'Y');
-  const officers = useMemo(() => {
-    const list = (aos.data?.items ?? []).map((u) => ({
-      value: u.id,
-      label: `${u.fullName} (Account Officer)`,
-    }));
-    if (me && me.roleCode === 'TO')
-      list.push({ value: me.id, label: `${me.fullName} (Treasury Officer)` });
-    return list;
-  }, [aos.data, me]);
 
   const submit = async () => {
     const e: Record<string, string> = {};
@@ -166,12 +151,8 @@ export function CallbackForm({
         >
           <Input value={phone} onChange={(e) => setPhone(e.target.value)} inputMode="tel" />
         </Field>
-        <Field label="Officer" error={errors.officerId} required>
-          <Select
-            value={officerId}
-            onChange={(e) => setOfficerId(e.target.value)}
-            options={officers}
-          />
+        <Field label="Officer" hint="The Account Officer who made the call">
+          <Input value={me?.fullName ?? ''} readOnly />
         </Field>
         <Field label="Date" error={errors.callDate} required>
           <DateInput value={date} onChange={(e) => setDate(e.target.value)} />
