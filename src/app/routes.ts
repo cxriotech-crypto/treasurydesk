@@ -15,6 +15,7 @@ import {
   Plus,
   ScrollText,
   Settings,
+  Upload,
   Users,
   Wallet,
   type LucideIcon,
@@ -94,6 +95,14 @@ export const ROUTES: RouteDef[] = [
     roles: ['OPS'],
     ready: true,
     icon: PlayCircle,
+    nav: 'Work',
+  },
+  {
+    path: '/imports',
+    label: 'Data import',
+    roles: ['TO', 'HT'],
+    ready: true,
+    icon: Upload,
     nav: 'Work',
   },
   {

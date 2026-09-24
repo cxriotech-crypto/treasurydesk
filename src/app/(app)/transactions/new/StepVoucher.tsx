@@ -17,6 +17,7 @@ import { useCurrentUser, useData } from '@/services/useData';
 import { useDebounced } from '@/components/hooks';
 import {
   Button,
+  ConfirmDialog,
   DateInput,
   Field,
   InlineAlert,
@@ -119,6 +120,7 @@ export function StepVoucher({ detail, goTo }: StepProps) {
   const [input, setInput] = useState<TxnInput>(txn.input);
   const [tab, setTab] = useState('0');
   const [signOpen, setSignOpen] = useState(false);
+  const [switchOff, setSwitchOff] = useState<'wht' | 'charge' | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const debounced = useDebounced(input, 150);
   const key = JSON.stringify(clean(debounced));
@@ -297,6 +299,20 @@ export function StepVoucher({ detail, goTo }: StepProps) {
   const ro = vouchers.find((v) => v.voucherType === 'RO');
   const fo = vouchers.find((v) => v.voucherType === 'FO');
 
+  // Switching a deduction off needs a reason, like every other exception in the app.
+  const switchOn = (which: 'wht' | 'charge') =>
+    setInput((i) =>
+      which === 'wht'
+        ? { ...i, whtOn: true, whtOffReason: undefined }
+        : { ...i, preliqChargeOn: true, preliqChargeOffReason: undefined }
+    );
+  const confirmSwitchOff = (which: 'wht' | 'charge', reason: string) =>
+    setInput((i) =>
+      which === 'wht'
+        ? { ...i, whtOn: false, whtOffReason: reason.trim() }
+        : { ...i, preliqChargeOn: false, preliqChargeOffReason: reason.trim() }
+    );
+
   // Deductions this voucher carries; each can be switched off for this transaction alone.
   const hasRow = (prefix: string) =>
     vouchers.some((v) => v.rows.some((r) => r.label.startsWith(prefix)));
@@ -334,20 +350,36 @@ export function StepVoucher({ detail, goTo }: StepProps) {
                 }
                 disabled={detail.customer.whtExempt}
                 checked={!detail.customer.whtExempt && input.whtOn !== false}
-                onChange={(v) => set('whtOn', v)}
+                onChange={(v) => (v ? switchOn('wht') : setSwitchOff('wht'))}
               />
+            ) : null}
+            {showWht && input.whtOn === false && input.whtOffReason ? (
+              <p className="pb-2 text-xs text-st-warning-fg">Not deducted: {input.whtOffReason}</p>
             ) : null}
             {showCharge ? (
               <Switch
                 label="Apply the pre-liquidation charge"
                 description={`Charge ${formatRate(settings.data?.values.preliqChargeRate ?? '0')} of the accrued interest for breaking the investment early.`}
                 checked={input.preliqChargeOn !== false}
-                onChange={(v) => set('preliqChargeOn', v)}
+                onChange={(v) => (v ? switchOn('charge') : setSwitchOff('charge'))}
               />
+            ) : null}
+            {showCharge && input.preliqChargeOn === false && input.preliqChargeOffReason ? (
+              <p className="pb-2 text-xs text-st-warning-fg">
+                Not applied: {input.preliqChargeOffReason}
+              </p>
             ) : null}
           </div>
         ) : null}
       </section>
+
+      {detail.controls.find((c) => c.controlCode === 'C03')?.state !== 'PASSED' ? (
+        <InlineAlert tone="warning" title="Customer call-back outstanding">
+          {detail.accountOfficerName} has not confirmed this instruction with{' '}
+          {detail.customer.customerName} yet. You can still submit — every approver sees the same
+          warning.
+        </InlineAlert>
+      ) : null}
 
       {hasErrors ? (
         <InlineAlert tone="danger" title="Fix before signing">
@@ -429,6 +461,35 @@ export function StepVoucher({ detail, goTo }: StepProps) {
           </Button>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={switchOff !== null}
+        onClose={() => setSwitchOff(null)}
+        title={
+          switchOff === 'charge'
+            ? 'Do not apply the pre-liquidation charge'
+            : 'Do not deduct withholding tax'
+        }
+        description={
+          switchOff === 'charge'
+            ? 'The charge will be zero on this voucher. The reason is printed on the voucher and kept in the audit trail.'
+            : 'No withholding tax will be deducted on this voucher. The reason is printed on the voucher and kept in the audit trail.'
+        }
+        confirmLabel={switchOff === 'charge' ? 'Switch the charge off' : 'Switch the tax off'}
+        tone="danger"
+        reason={{
+          label: 'Reason',
+          placeholder:
+            switchOff === 'charge'
+              ? 'e.g. Head of Treasury waived the charge — customer bereavement'
+              : 'e.g. Customer produced a valid tax exemption certificate',
+          required: true,
+        }}
+        onConfirm={(reason) => {
+          confirmSwitchOff(switchOff === 'charge' ? 'charge' : 'wht', reason);
+          setSwitchOff(null);
+        }}
+      />
 
       <SignatureModal
         open={signOpen}

@@ -72,6 +72,22 @@ export default function ApprovalsPage() {
     },
     { key: 'maker', header: 'Maker', cell: (r) => r.makerName },
     {
+      key: 'note',
+      header: 'Note',
+      cardLabel: 'Note from the last signature',
+      cell: (r) =>
+        r.lastNote ? (
+          <span className="block max-w-[18rem] text-xs">
+            <span className="font-medium">
+              {r.lastNote.by}, {r.lastNote.position}:
+            </span>{' '}
+            <span className="text-muted">{r.lastNote.note}</span>
+          </span>
+        ) : (
+          <span className="text-xs text-muted">—</span>
+        ),
+    },
+    {
       key: 'wait',
       header: 'Waiting',
       cell: (r) => <span className="num">{formatDuration(r.waitingMinutes)}</span>,

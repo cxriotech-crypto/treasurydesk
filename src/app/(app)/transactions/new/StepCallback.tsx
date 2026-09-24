@@ -1,7 +1,9 @@
 'use client';
 
+import { useState } from 'react';
 import { ArrowLeft, ArrowRight } from 'lucide-react';
-import { Button, InlineAlert } from '@/components/ui';
+import { Button, InlineAlert, toastError } from '@/components/ui';
+import { transactionsService } from '@/services';
 import { CallbackForm, CallbackHistory } from '@/components/txn/CallbackForm';
 import type { StepProps } from './Wizard';
 
@@ -10,6 +12,21 @@ export function StepCallback({ detail, goTo }: StepProps) {
   const last = detail.callbacks[0];
   // SOP step 3: only the customer's Account Officer may make and log this call.
   const mine = !detail.actions.logCallback;
+  const [busy, setBusy] = useState(false);
+
+  // The call-back is recorded but does not block, so the maker can go on and come back to it.
+  const skip = async () => {
+    setBusy(true);
+    try {
+      await transactionsService.saveDraft(detail.txn.id, { wizardStep: 5 });
+      goTo(5);
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="space-y-5">
       <p className="text-sm text-muted">
@@ -19,8 +36,8 @@ export function StepCallback({ detail, goTo }: StepProps) {
       {!confirmed && !mine ? (
         <InlineAlert tone="info" title="Waiting for the Account Officer">
           {detail.actions.logCallback}. {detail.accountOfficerName} has been notified and can log
-          the call from their call-back list. The transaction stays in verification until the
-          customer confirms.
+          the call from their call-back list. You can carry on with the voucher meanwhile — the
+          outstanding call-back is shown to every approver.
         </InlineAlert>
       ) : null}
       {confirmed ? (
@@ -29,8 +46,8 @@ export function StepCallback({ detail, goTo }: StepProps) {
         </InlineAlert>
       ) : last ? (
         <InlineAlert tone="warning" title="Not yet confirmed">
-          Last call: {last.outcome.toLowerCase()} — {last.notes}. Try again; the transaction stays
-          in verification.
+          Last call: {last.outcome.toLowerCase()} — {last.notes}. Try again; the control stays
+          outstanding until the customer confirms.
         </InlineAlert>
       ) : null}
       {!confirmed && mine ? (
@@ -51,6 +68,10 @@ export function StepCallback({ detail, goTo }: StepProps) {
         {confirmed ? (
           <Button variant="primary" iconRight={ArrowRight} onClick={() => goTo(5)}>
             Continue
+          </Button>
+        ) : !detail.actions.continueDraft ? (
+          <Button iconRight={ArrowRight} loading={busy} onClick={() => void skip()}>
+            Continue without the call-back
           </Button>
         ) : null}
       </div>

@@ -43,6 +43,7 @@ const ID_PREFIX: Record<TableName, string> = {
   comments: 'CMT',
   notifications: 'NTF',
   audit: 'AUD',
+  imports: 'IMP',
   holidays: 'HOL',
   integrations: 'INT',
 };

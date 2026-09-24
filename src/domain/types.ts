@@ -145,9 +145,11 @@ export interface TxnInput {
   annivPeriod?: 30 | 60 | 90;
   // third party / transfer
   beneficiaryId?: string;
-  // per-transaction switches (undefined = on)
+  // per-transaction switches (undefined = on); switching one off requires a reason
   whtOn?: boolean; // deduct withholding tax on this transaction
+  whtOffReason?: string;
   preliqChargeOn?: boolean; // apply the pre-liquidation charge on this transaction
+  preliqChargeOffReason?: string;
   // reversal corrected values
   correctedRate?: Rate;
   correctedTenorDays?: number;
@@ -316,6 +318,32 @@ export interface TxnComment extends BaseRecord {
   body: string;
   createdAt: IsoDateTime;
   editedAt: IsoDateTime | null;
+}
+
+export type ImportRegister =
+  'CUSTOMERS' | 'ACCOUNTS' | 'INVESTMENTS' | 'BENEFICIARIES' | 'BANKS' | 'HOLIDAYS';
+
+export type ImportStatus = 'PENDING_APPROVAL' | 'APPLIED' | 'REJECTED';
+
+/** A file of opening data uploaded by staff: validated on upload, applied once approved. */
+export interface ImportBatch extends BaseRecord {
+  batchRef: string;
+  register: ImportRegister;
+  fileName: string;
+  /** Rows that passed validation, in file order, keyed by column. */
+  rows: Record<string, string>[];
+  /** Rows that failed, kept so the uploader can see what was left out. */
+  rejectedRows: { line: number; errors: string[] }[];
+  status: ImportStatus;
+  uploadedBy: string;
+  uploadedAt: IsoDateTime;
+  decidedBy: string | null;
+  decidedAt: IsoDateTime | null;
+  comments: string;
+  /** Records actually created when the batch was applied. */
+  createdCount: number;
+  /** Rows that could not be written when the batch was applied, and why. */
+  skippedRows: { row: number; reason: string }[];
 }
 
 export interface Notification extends BaseRecord {

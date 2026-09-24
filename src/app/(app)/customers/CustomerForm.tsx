@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Customer } from '@/domain/types';
 import type { CustomerType } from '@/domain/codes';
 import { AppError, customersService, usersService } from '@/services';
@@ -50,8 +50,16 @@ export function CustomerForm({
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
 
+  // Fill the form once, when the dialog opens. A background refresh of the customer must never
+  // overwrite what the user is typing.
+  const filled = useRef(false);
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      filled.current = false;
+      return;
+    }
+    if (filled.current) return;
+    filled.current = true;
     setErrors({});
     setF({
       customerName: customer?.customerName ?? '',

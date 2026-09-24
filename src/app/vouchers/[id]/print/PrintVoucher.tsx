@@ -119,7 +119,10 @@ export function PrintVoucher() {
                 key={`${r.label}-${i}`}
                 className={`grid grid-cols-[1fr_auto] ${i ? 'border-t border-zinc-300' : ''} ${r.kind === 'total' ? 'bg-zinc-100 font-bold' : ''}`}
               >
-                <p className="px-2 py-1">{r.label}</p>
+                <p className="px-2 py-1">
+                  {r.label}
+                  {r.note ? <span className="block text-[9px] italic">{r.note}</span> : null}
+                </p>
                 <p className="num px-2 py-1 text-right">{formatRowValue(r)}</p>
               </div>
             ))}

@@ -16,6 +16,7 @@ import {
   XOctagon,
 } from 'lucide-react';
 import {
+  APPROVAL_LEVELS,
   CHANNEL_LABELS,
   PENDING_APPROVAL_STATUSES,
   SCENARIO_META,
@@ -325,6 +326,19 @@ export function TxnDetailView({ id }: { id: string }) {
   const a = d.actions;
   const role = me?.roleCode;
   const pendingApproval = PENDING_APPROVAL_STATUSES.includes(t.status);
+  // Notes left by this round's signatures, for whoever receives the transaction next.
+  const notes = d.approvals
+    .filter((a) => a.cycleNo === t.cycleNo && a.action === 'APPROVE' && a.comments.trim())
+    .sort((a, b) => a.levelNo - b.levelNo)
+    .map((a) => ({
+      by: a.userName,
+      position: APPROVAL_LEVELS[a.levelNo - 1].label,
+      note: a.comments.trim(),
+    }));
+  // The call-back does not block, so an unconfirmed one is shown to whoever opens the transaction.
+  const callbackOutstanding =
+    d.controls.find((c) => c.controlCode === 'C03')?.state !== 'PASSED' &&
+    !['DRAFT', 'STOPPED', 'REJECTED', 'CANCELLED'].includes(t.status);
   const level = levelForStatus(t.status);
   const isApprover = role === 'HT' || role === 'MIS' || role === 'AUD' || role === 'MD';
 
@@ -443,6 +457,31 @@ export function TxnDetailView({ id }: { id: string }) {
         }
       />
 
+      {notes.length ? (
+        <div className="mb-4">
+          <InlineAlert tone="info" title="Notes from the signatures so far">
+            <ul className="space-y-1">
+              {notes.map((n) => (
+                <li key={`${n.by}-${n.position}`}>
+                  <span className="font-medium">
+                    {n.by}, {n.position}:
+                  </span>{' '}
+                  {n.note}
+                </li>
+              ))}
+            </ul>
+          </InlineAlert>
+        </div>
+      ) : null}
+      {callbackOutstanding ? (
+        <div className="mb-4">
+          <InlineAlert tone="warning" title="Customer call-back outstanding">
+            {d.accountOfficerName} has not confirmed this instruction with {d.customer.customerName}{' '}
+            yet. The call-back is recorded but does not stop the transaction, so check it before you
+            sign.
+          </InlineAlert>
+        </div>
+      ) : null}
       {t.status === 'RETURNED' && t.returnComment ? (
         <div className="mb-4">
           <InlineAlert tone="warning" title="Returned for correction">

@@ -11,6 +11,7 @@ import type {
   Customer,
   Execution,
   Instruction,
+  ImportBatch,
   IntegrationConfig,
   Investment,
   Mandate,
@@ -24,7 +25,7 @@ import type {
   Voucher,
 } from '@/domain/types';
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 export interface Db {
   schemaVersion: number;
@@ -52,6 +53,7 @@ export interface Db {
   comments: TxnComment[];
   notifications: Notification[];
   audit: AuditEvent[];
+  imports: ImportBatch[];
   settings: SysSettingsRecord;
   holidays: PublicHoliday[];
   integrations: IntegrationConfig[];
@@ -88,6 +90,7 @@ export function emptyDb(settings: SysSettingsRecord, seedDate: string, seededAt:
     comments: [],
     notifications: [],
     audit: [],
+    imports: [],
     settings,
     holidays: [],
     integrations: [],

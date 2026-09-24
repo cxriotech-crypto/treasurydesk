@@ -31,6 +31,15 @@ The user menu switches between the demo users in one click.
   Eazybankz check → voucher(s) → five signatures → Operations execution → Treasury confirmation.
 - **Maker-checker throughout.** The Treasury Officer who raises a transaction can never approve it, and no user
   signs the same transaction twice. Blocked buttons say why.
+- **The customer call-back belongs to the Account Officer** (SOP step 3). Only the officer the customer belongs
+  to can make and log it; they are notified as soon as the signature is verified. It is **recorded but not
+  enforced**: a transaction can go on to the voucher and through approval with the call-back still outstanding,
+  and everyone who opens it — including all five approvers — sees a warning until the customer confirms. This
+  is a deliberate demo decision; the SOP's control checklist requires the call before processing.
+- **Withholding tax and the pre-liquidation charge can each be switched off per transaction**, on the voucher
+  step. Switching one off requires a typed reason, the same way stop, return and reject do. The reason prints
+  on the voucher beneath the row it explains and is kept in the audit trail. A WHT-exempt customer locks the
+  tax switch off and says why.
 - **Returns, rejections, stops, failed call-backs and GAPS failures** all behave as the SOP describes, including
   retrying a failed GAPS submission and resubmission after a return (earlier approval rounds stay in history).
 - **Every figure is calculated** by `src/lib/calc.ts` with decimal.js. Hovering the "fx" marker shows the formula
@@ -38,6 +47,15 @@ The user menu switches between the demo users in one click.
 - **Printable A4 vouchers** with amount in words, payment instruction, five signature boxes and the Operations box.
 - **Registers**: investments (live accrued interest), customers (full CRUD with signatories, mandate, accounts and
   beneficiaries), calendar, call-back log, notifications.
+- **Data import** (Treasury → Data import): load customers, accounts, investments, beneficiaries, banks or public
+  holidays from a **CSV or Excel (.xlsx)** file. Each register has a downloadable template; every row is checked
+  before anything is written and the rows that fail are listed with their line number and reason. A Treasury
+  Officer's upload waits for the Head of Treasury to approve it; a Head of Treasury's own upload applies straight
+  away. Rows that cannot be written at that point (a missing customer, a duplicate) are skipped with a stated
+  reason, and every record created is audited.
+- **Approval notes.** Any approver can leave an optional note when they sign. Whoever receives the transaction
+  next sees the name, the position and the note — on the transaction itself, in their approval queue and in the
+  notification.
 - **Oversight**: 8 reports with CSV / Excel / print, a hash-chained audit trail with an integrity check, settings
   (rates, SLA, holidays, banks, users and permissions, integrations, demo controls) and the calculation self-check.
 - **Responsive** from 360 px to 1920 px, light and dark, with no horizontal page scroll.
@@ -73,5 +91,9 @@ resets it, changes the simulated latency, or forces GAPS failures.
   pre-liquidation, SLA 8 hours with a 15:00 cut-off.
 - Maturities falling on a weekend or public holiday move to the next business day.
 - Eid holiday dates are estimates and are editable in Settings.
-- Account Officers only see transactions, investments and call-backs for their own customers.
+- Account Officers only see transactions, investments and call-backs for their own customers, and only they can
+  log a call-back — there is no cover path for an officer on leave, so confirm how absence is handled.
+- The pre-liquidation charge is a flat 20% of accrued interest. The SOP lists the charges as "30 Days, 60 Days,
+  90 Days" without rates; if the charge is tiered by how early the investment is broken, the tiers are needed.
+- The call-back is recorded but does not block any transaction. Confirm whether it should block in production.
 - The demo signs users out after 17 minutes of inactivity, with a warning at 15.

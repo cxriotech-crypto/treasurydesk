@@ -778,6 +778,25 @@ export function computeTxn(c: TxnCalcContext, baseEnv: CalcEnv): TxnComputation 
     if (!v.notes.length && notes.length) v.notes = [...notes];
   });
 
+  // A deduction switched off for this transaction carries its reason on the row it explains,
+  // and cannot be left unexplained: the reason is required before the voucher can be signed.
+  let whtOff = false;
+  let chargeOff = false;
+  for (const v of vouchers) {
+    for (const row of v.rows) {
+      if (!row.label.includes('(switched off)')) continue;
+      const charge = row.label.startsWith('Pre-liquidation charge');
+      const reason = (charge ? i.preliqChargeOffReason : i.whtOffReason)?.trim();
+      if (charge) chargeOff = true;
+      else whtOff = true;
+      if (reason) row.note = `Switched off: ${reason}`;
+    }
+  }
+  if (whtOff && !i.whtOffReason?.trim())
+    errors.whtOffReason = 'Give a reason for not deducting withholding tax';
+  if (chargeOff && !i.preliqChargeOffReason?.trim())
+    errors.preliqChargeOffReason = 'Give a reason for not applying the pre-liquidation charge';
+
   return { vouchers, headlineAmt, errors, notes, summary };
 }
 

@@ -13,7 +13,8 @@ import {
 async function buildToVoucher(
   page: import('@playwright/test').Page,
   type: RegExp,
-  scenario: RegExp
+  scenario: RegExp,
+  opts: { skipCallback?: boolean } = {}
 ) {
   await page.goto('/transactions/new');
   await page.getByRole('radio', { name: type }).click();
@@ -71,6 +72,17 @@ async function buildToVoucher(
   await expect(page.getByText('Waiting for the Account Officer')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Save call-back' })).toHaveCount(0);
   const draftUrl = page.url();
+
+  // The call-back never blocks: the maker can carry on and the control stays outstanding.
+  if (opts.skipCallback) {
+    await page.getByRole('button', { name: 'Continue without the call-back' }).click();
+    await expect(page.getByRole('heading', { name: /5\. Eazybankz/ })).toBeVisible({
+      timeout: 20_000,
+    });
+    await finishToVoucher(page);
+    return ref;
+  }
+
   const intro = (await page
     .locator('main p', { hasText: /calls .* and confirms/ })
     .first()
@@ -99,8 +111,12 @@ async function buildToVoucher(
   // Back to the maker to finish the voucher.
   await switchToName(page, NAMES.TO);
   await page.goto(draftUrl);
+  await finishToVoucher(page);
+  return ref;
+}
 
-  // Step 5 – Eazybankz
+/** Steps 5 and 6: confirm Eazybankz, then land on the voucher. */
+async function finishToVoucher(page: import('@playwright/test').Page) {
   await expect(page.getByRole('heading', { name: /5\. Eazybankz/ })).toBeVisible();
   await page.getByRole('button', { name: 'Refresh from Eazybankz' }).click();
   await page.getByLabel('Figures confirmed in Eazybankz').check();
@@ -111,7 +127,6 @@ async function buildToVoucher(
   }
   await page.getByRole('button', { name: 'Continue to voucher' }).click();
   await expect(page.getByRole('heading', { name: /6\. Voucher/ })).toBeVisible();
-  return ref;
 }
 
 test.describe('Transaction flows', () => {
@@ -126,9 +141,16 @@ test.describe('Transaction flows', () => {
     // The two deductions can be switched off for this transaction alone, then back on.
     const charge = page.getByRole('switch', { name: 'Apply the pre-liquidation charge' });
     await charge.click();
+    const why = page.getByRole('dialog');
+    await why.getByRole('button', { name: 'Switch the charge off' }).click();
+    await expect(why.getByText('Reason is required')).toBeVisible();
+    await why.getByLabel('Reason').fill('Head of Treasury waived it — customer bereavement');
+    await why.getByRole('button', { name: 'Switch the charge off' }).click();
     await expect(page.getByText('Pre-liquidation charge (switched off)')).toBeVisible();
-    await charge.click();
+    await expect(page.getByText(/Switched off: Head of Treasury waived it/)).toBeVisible();
+    await charge.click(); // back on, and the reason goes with it
     await expect(page.getByText(/Pre-liquidation charge \(20%\)/)).toBeVisible();
+    await expect(page.getByText(/Switched off: Head of Treasury/)).toHaveCount(0);
     // Interest is not paid out on a partial pre-liquidation, so there is no tax to switch.
     await expect(page.getByRole('switch', { name: 'Deduct withholding tax' })).toHaveCount(0);
     await page.getByRole('button', { name: 'Sign & submit' }).click();
@@ -143,10 +165,19 @@ test.describe('Transaction flows', () => {
     // HT approves, MIS returns, maker corrects and resubmits.
     await switchTo(page, 'HT');
     await page.getByRole('button', { name: 'Approve & sign' }).first().click();
-    await sign(page, 'HT');
+    await sign(page, 'HT', 'Approve & sign', 'Rate confirmed with the customer by phone');
     await expect(page.getByText('Awaiting MIS', { exact: true }).first()).toBeVisible();
 
+    // The next approver is shown who left the note, their position, and the note itself.
     await switchTo(page, 'MIS');
+    await expect(page.getByText('Notes from the signatures so far')).toBeVisible();
+    await expect(page.getByText('Ibrahim Musa, Head, Treasury:')).toBeVisible();
+    await expect(page.getByText('Rate confirmed with the customer by phone')).toBeVisible();
+    await page.goto('/approvals');
+    await expect(
+      page.locator('main table').getByText('Rate confirmed with the customer by phone')
+    ).toBeVisible();
+    await page.goBack();
     await page.getByRole('button', { name: 'Return to maker' }).first().click();
     await page.getByRole('dialog').getByLabel('Comment to the maker').fill('Attach a clearer scan');
     await page.getByRole('dialog').getByRole('button', { name: 'Return to maker' }).click();
@@ -273,9 +304,33 @@ test.describe('Transaction flows', () => {
     }
     await expect(page.getByText('WHT', { exact: true })).toBeVisible();
     await tax.click();
+    const why = page.getByRole('dialog');
+    await why.getByLabel('Reason').fill('Customer produced a tax exemption certificate');
+    await why.getByRole('button', { name: 'Switch the tax off' }).click();
     await expect(page.getByText('WHT (switched off)')).toBeVisible();
+    await expect(page.getByText(/Switched off: Customer produced/)).toBeVisible();
     await tax.click();
     await expect(page.getByText('WHT', { exact: true })).toBeVisible();
+  });
+
+  test('a transaction can be submitted with the call-back outstanding', async ({ page }) => {
+    await fastDemo(page);
+    await login(page, 'TO');
+    await buildToVoucher(page, /Termination at maturity/, /Principal \+ interest/, {
+      skipCallback: true,
+    });
+    await expect(page.getByText('Customer call-back outstanding')).toBeVisible();
+    await page.getByRole('button', { name: 'Sign & submit' }).click();
+    await sign(page, 'TO', 'Sign & submit');
+    await expect(page.getByText('Awaiting Head Treasury', { exact: true }).first()).toBeVisible({
+      timeout: 20_000,
+    });
+
+    // Every approver sees the same warning before signing.
+    await switchTo(page, 'HT');
+    await expect(page.getByText('Customer call-back outstanding')).toBeVisible();
+    await page.getByRole('tab', { name: /Controls/ }).click();
+    await expect(page.getByRole('tabpanel').getByLabel('pending')).not.toHaveCount(0);
   });
 
   test('the printed voucher shows the figures, words and signatures', async ({ page }) => {

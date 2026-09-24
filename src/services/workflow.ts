@@ -9,6 +9,8 @@ import type {
   Account,
   AppUser,
   CallbackLog,
+  ImportBatch,
+  ImportRegister,
   ControlCheck,
   Ctx,
   Instruction,
@@ -23,6 +25,7 @@ import {
   CONTROL_CODES,
   SCENARIO_META,
   TXN_STATUS_META,
+  type AnnivFreq,
   levelForStatus,
   scenarioLabel,
   type ControlCode,
@@ -42,7 +45,7 @@ import {
   slaState,
 } from '@/domain/rules';
 import type { CalcEnv } from '@/lib/calc';
-import { validateAccountNo } from '@/lib/calc';
+import { maturityDate, validateAccountNo } from '@/lib/calc';
 import { addDays, isIsoDate, isoDatePart, lagosDateTime, parseIso, yearOf } from '@/lib/dates';
 import { formatNaira } from '@/lib/format';
 import { add, dec, gt, isValidMoney, isPositive, sub, toMoney, ZERO } from '@/lib/money';
@@ -723,7 +726,8 @@ export function confirmCbs(ctx: Ctx, txnId: string, data: CbsConfirmation): Trea
     const t = txnOf(db, txnId);
     requireMaker(t, u);
     requireStatus(t, ['VERIFICATION', 'RETURNED']);
-    requireControls(db, t.id, ['C01', 'C02', 'C03']);
+    // C03 (customer call-back) is recorded but does not block: see CHANGES.md.
+    requireControls(db, t.id, ['C01', 'C02']);
     if (t.scenarioCode === 'INFLOW' && (!data.fundsReceived || !data.sourceConfirmed)) {
       throw new AppError(
         'Confirm that funds were received and the source account is confirmed.',
@@ -793,7 +797,8 @@ export function signAndSubmit(
     const t = txnOf(db, txnId, version);
     requireMaker(t, u);
     requireStatus(t, ['VERIFICATION', 'RETURNED']);
-    requireControls(db, t.id, ['C01', 'C02', 'C03', 'C04']);
+    // C03 (customer call-back) is recorded but does not block: see CHANGES.md.
+    requireControls(db, t.id, ['C01', 'C02', 'C04']);
     checkSignature(u, sign);
     const comp = computeFor(db, t, today(ctx));
     if (Object.keys(comp.errors).length) {
@@ -934,10 +939,13 @@ export function approve(ctx: Ctx, txnId: string, sign: SignArgs, version?: numbe
       });
     } else {
       const nextLevel = levelForStatus(next)!;
+      const note = sign.comments?.trim();
       notify(db, ctx, {
         targetRole: nextLevel.roleCode,
         title: `Approval needed: ${t.txnRef}`,
-        body: `${scenarioLabel(t.scenarioCode)} · ${formatNaira(t.headlineAmt)} approved by ${u.fullName}`,
+        body: note
+          ? `${scenarioLabel(t.scenarioCode)} · ${formatNaira(t.headlineAmt)}. ${u.fullName}, ${level.label}: ${note}`
+          : `${scenarioLabel(t.scenarioCode)} · ${formatNaira(t.headlineAmt)} approved by ${u.fullName}`,
         link: link(t),
       });
     }
@@ -1557,6 +1565,316 @@ export function deleteComment(ctx: Ctx, commentId: string, version?: number): vo
       before: { body: c.body },
     });
   });
+}
+
+// ─── Data import ─────────────────────────────────────────────────────────────
+
+export interface ImportDraft {
+  register: ImportRegister;
+  fileName: string;
+  rows: Record<string, string>[];
+  rejectedRows: { line: number; errors: string[] }[];
+}
+
+/**
+ * Upload a validated file. A Head of Treasury's own upload is applied straight away; a Treasury
+ * Officer's waits for a Head of Treasury to approve it.
+ */
+export function createImport(ctx: Ctx, draft: ImportDraft): ImportBatch {
+  return mutate((db) => {
+    const u = actor(db, ctx, ['TO', 'HT']);
+    if (!draft.rows.length)
+      throw new AppError('There are no valid rows to import.', 'VALIDATION', {
+        file: 'No valid rows',
+      });
+    const year = yearOf(today(ctx));
+    const batch = insert(db, 'imports', {
+      batchRef: `IMP-${year}-${String(nextCounter(db, `import:${year}`)).padStart(4, '0')}`,
+      register: draft.register,
+      fileName: draft.fileName,
+      rows: draft.rows,
+      rejectedRows: draft.rejectedRows,
+      status: 'PENDING_APPROVAL',
+      uploadedBy: u.id,
+      uploadedAt: ctx.at,
+      decidedBy: null,
+      decidedAt: null,
+      comments: '',
+      createdCount: 0,
+      skippedRows: [],
+    });
+    writeAudit(db, ctx, {
+      entity: 'ImportBatch',
+      entityId: batch.id,
+      action: 'CREATE',
+      summary: `${batch.batchRef}: ${draft.rows.length} ${draft.register.toLowerCase()} row(s) uploaded from ${draft.fileName}`,
+      after: { register: draft.register, rows: draft.rows.length, fileName: draft.fileName },
+    });
+    if (u.roleCode === 'HT') return applyImport(db, ctx, batch, u, 'Uploaded and applied');
+    notify(db, ctx, {
+      targetRole: 'HT',
+      title: `Data import to approve: ${batch.batchRef}`,
+      body: `${u.fullName} uploaded ${draft.rows.length} ${draft.register.toLowerCase()} row(s).`,
+      link: '/imports',
+    });
+    return batch;
+  });
+}
+
+/** Approve a pending upload and write its rows, or reject it with a reason. */
+export function decideImport(
+  ctx: Ctx,
+  batchId: string,
+  decision: 'APPROVE' | 'REJECT',
+  sign: SignArgs,
+  version?: number
+): ImportBatch {
+  return mutate((db) => {
+    const u = actor(db, ctx, ['HT']);
+    const batch = getById(db, 'imports', batchId, 'import');
+    if (version !== undefined && batch.version !== version)
+      throw new AppError(
+        'This import was changed by someone else. Reload and try again.',
+        'CONFLICT'
+      );
+    if (batch.status !== 'PENDING_APPROVAL')
+      throw new AppError('This import has already been decided.', 'STATE');
+    if (batch.uploadedBy === u.id)
+      throw new AppError('You cannot approve an import you uploaded yourself.', 'FORBIDDEN');
+    checkSignature(u, sign);
+    if (decision === 'REJECT') {
+      const reason = sign.comments?.trim();
+      if (!reason)
+        throw new AppError('A reason is required when rejecting an import.', 'VALIDATION', {
+          comments: 'Give a reason',
+        });
+      const { before, after } = update(db, 'imports', batch.id, {
+        status: 'REJECTED',
+        decidedBy: u.id,
+        decidedAt: ctx.at,
+        comments: reason,
+      });
+      writeAudit(db, ctx, {
+        entity: 'ImportBatch',
+        entityId: batch.id,
+        action: 'REJECT',
+        summary: `${batch.batchRef}: rejected – ${reason}`,
+        before,
+        after,
+      });
+      notify(db, ctx, {
+        targetUserId: batch.uploadedBy,
+        title: `Import rejected: ${batch.batchRef}`,
+        body: `${u.fullName}: ${reason}`,
+        link: '/imports',
+      });
+      return getById(db, 'imports', batch.id, 'import');
+    }
+    return applyImport(db, ctx, batch, u, sign.comments?.trim() ?? '');
+  });
+}
+
+/** Write the rows of an approved batch into their register. */
+function applyImport(
+  db: Db,
+  ctx: Ctx,
+  batch: ImportBatch,
+  by: AppUser,
+  comments: string
+): ImportBatch {
+  let created = 0;
+  const skippedRows: { row: number; reason: string }[] = [];
+  batch.rows.forEach((row, i) => {
+    try {
+      created += importRow(db, ctx, batch.register, row) ? 1 : 0;
+    } catch (e) {
+      // A row that no longer fits the data — a missing customer, a duplicate — is left out and
+      // the reason is kept, so nothing disappears without an explanation.
+      skippedRows.push({ row: i + 1, reason: (e as Error).message });
+    }
+  });
+  const { before, after } = update(db, 'imports', batch.id, {
+    status: 'APPLIED',
+    decidedBy: by.id,
+    decidedAt: ctx.at,
+    comments,
+    createdCount: created,
+    skippedRows,
+  });
+  writeAudit(db, ctx, {
+    entity: 'ImportBatch',
+    entityId: batch.id,
+    action: 'APPLY',
+    summary: `${batch.batchRef}: ${created} ${batch.register.toLowerCase()} record(s) created`,
+    before,
+    after,
+  });
+  if (batch.uploadedBy !== by.id)
+    notify(db, ctx, {
+      targetUserId: batch.uploadedBy,
+      title: `Import applied: ${batch.batchRef}`,
+      body: `${by.fullName} approved it. ${created} record(s) created.`,
+      link: '/imports',
+    });
+  return getById(db, 'imports', batch.id, 'import');
+}
+
+function importRow(db: Db, ctx: Ctx, register: ImportRegister, row: Record<string, string>) {
+  const customerOf = (cif: string) => {
+    const c = db.customers.find((x) => x.cifNo === cif);
+    if (!c) throw new AppError(`No customer with CIF ${cif}`, 'VALIDATION');
+    return c;
+  };
+  switch (register) {
+    case 'CUSTOMERS': {
+      const officer = db.users.find(
+        (u) =>
+          u.email.toLowerCase() === row.accountOfficerEmail.toLowerCase() && u.roleCode === 'AO'
+      );
+      if (!officer) throw new AppError('Unknown Account Officer', 'VALIDATION');
+      const cifNo = `FMT${String(nextCounter(db, 'cif')).padStart(6, '0')}`;
+      const c = insert(db, 'customers', {
+        cifNo,
+        customerName: row.customerName,
+        customerType: row.customerType === 'CORPORATE' ? 'CORP' : 'IND',
+        regPhone: row.regPhone,
+        email: row.email,
+        address: row.address,
+        bvnMasked: row.bvn ? `*******${row.bvn.slice(-4)}` : '',
+        whtExempt: row.whtExempt === 'YES',
+        accountOfficerId: officer.id,
+        status: 'ACTIVE',
+        createdAt: ctx.at,
+      });
+      writeAudit(db, ctx, {
+        entity: 'Customer',
+        entityId: c.id,
+        action: 'IMPORT',
+        summary: `${c.cifNo} ${c.customerName} imported`,
+        after: { customerName: c.customerName, cifNo: c.cifNo },
+      });
+      return true;
+    }
+    case 'ACCOUNTS': {
+      const c = customerOf(row.cifNo);
+      if (db.accounts.some((a) => a.accountNo === row.accountNo))
+        throw new AppError('Account number already exists', 'VALIDATION');
+      const a = insert(db, 'accounts', {
+        customerId: c.id,
+        accountNo: row.accountNo,
+        accountName: row.accountName,
+        productCode: row.productCode === 'SS' ? 'SS' : 'PA',
+        ledgerBal: row.ledgerBal,
+        availableBal: row.availableBal || row.ledgerBal,
+        status: 'ACTIVE',
+        openedDate: row.openedDate,
+      });
+      writeAudit(db, ctx, {
+        entity: 'Account',
+        entityId: a.id,
+        action: 'IMPORT',
+        summary: `${a.accountNo} imported for ${c.customerName}`,
+        after: { accountNo: a.accountNo, ledgerBal: a.ledgerBal },
+      });
+      return true;
+    }
+    case 'INVESTMENTS': {
+      const c = customerOf(row.cifNo);
+      const acc = db.accounts.find((a) => a.accountNo === row.accountNo && a.customerId === c.id);
+      if (!acc) throw new AppError('Funding account not found for this customer', 'VALIDATION');
+      const tenorDays = Number(row.tenorDays);
+      const annivFreqDays = Number(row.annivFreqDays || '0') as AnnivFreq;
+      const maturity = maturityDate(
+        row.effectiveDate,
+        tenorDays,
+        db.holidays.map((h) => h.holidayDate),
+        db.settings.values.maturityHolidayRule
+      );
+      const year = yearOf(today(ctx));
+      const inv = insert(db, 'investments', {
+        investmentRef: `INV-${year}-${String(nextCounter(db, `invRef:${year}`)).padStart(5, '0')}`,
+        customerId: c.id,
+        accountId: acc.id,
+        productCode: (row.productCode as 'TERM' | 'CP' | 'CALL') ?? 'TERM',
+        principalAmt: row.principalAmt,
+        intRate: row.intRate,
+        effectiveDate: row.effectiveDate,
+        tenorDays,
+        maturityDate: maturity.date,
+        annivFreqDays,
+        nextAnnivDate: annivFreqDays ? addDays(row.effectiveDate, annivFreqDays) : null,
+        intPaidToDate: row.intPaidToDate || ZERO,
+        status: maturity.date < today(ctx) ? 'MATURED' : 'ACTIVE',
+        parentInvestmentId: null,
+        originTxnId: null,
+        closedTxnId: null,
+        closedDate: null,
+        createdAt: ctx.at,
+      });
+      writeAudit(db, ctx, {
+        entity: 'Investment',
+        entityId: inv.id,
+        action: 'IMPORT',
+        summary: `${inv.investmentRef} imported for ${c.customerName}`,
+        after: { principalAmt: inv.principalAmt, intRate: inv.intRate, maturity: inv.maturityDate },
+      });
+      return true;
+    }
+    case 'BENEFICIARIES': {
+      const c = customerOf(row.cifNo);
+      const b = insert(db, 'beneficiaries', {
+        customerId: c.id,
+        benefName: row.benefName,
+        bankCode: row.bankCode,
+        accountNo: row.accountNo,
+        accountType: row.accountType === 'CURRENT' ? 'CURRENT' : 'SAVINGS',
+        isInternal: row.bankCode === INTERNAL_BANK_CODE,
+        createdAt: ctx.at,
+      });
+      writeAudit(db, ctx, {
+        entity: 'Beneficiary',
+        entityId: b.id,
+        action: 'IMPORT',
+        summary: `${b.benefName} imported for ${c.customerName}`,
+        after: { benefName: b.benefName, accountNo: b.accountNo },
+      });
+      return true;
+    }
+    case 'BANKS': {
+      if (db.banks.some((b) => b.bankCode === row.bankCode))
+        throw new AppError('Bank code already exists', 'VALIDATION');
+      const b = insert(db, 'banks', {
+        bankCode: row.bankCode,
+        bankName: row.bankName,
+        shortName: row.shortName,
+        active: true,
+      });
+      writeAudit(db, ctx, {
+        entity: 'Bank',
+        entityId: b.id,
+        action: 'IMPORT',
+        summary: `${b.bankCode} ${b.bankName} imported`,
+        after: { bankCode: b.bankCode, bankName: b.bankName },
+      });
+      return true;
+    }
+    case 'HOLIDAYS': {
+      if (db.holidays.some((h) => h.holidayDate === row.holidayDate))
+        throw new AppError('That date is already a holiday', 'VALIDATION');
+      const h = insert(db, 'holidays', {
+        holidayDate: row.holidayDate,
+        description: row.description,
+      });
+      writeAudit(db, ctx, {
+        entity: 'PublicHoliday',
+        entityId: h.id,
+        action: 'IMPORT',
+        summary: `${h.holidayDate} ${h.description} imported`,
+        after: { holidayDate: h.holidayDate },
+      });
+      return true;
+    }
+  }
 }
 
 // ─── Housekeeping ────────────────────────────────────────────────────────────

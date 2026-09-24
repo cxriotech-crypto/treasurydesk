@@ -131,6 +131,8 @@ function inputFor(s: ScenarioCode, subj: ReturnType<typeof subjectFor>): TxnInpu
 
 interface RunOpts {
   external?: boolean;
+  /** Never call the customer: the call-back is recorded but does not block. */
+  skipCallback?: boolean;
   callbackFailFirst?: boolean;
   returnAtMis?: boolean;
   gapsFailFirst?: boolean;
@@ -173,15 +175,16 @@ async function runScenario(s: ScenarioCode, o: RunOpts = {}): Promise<TreasuryTx
     ownershipOk: true,
     completeOk: true,
   });
-  // Call-back by the customer's Account Officer.
-  await as(cust.accountOfficerId);
+  // Call-back by the customer's Account Officer. It is recorded but never blocks, so a run can
+  // skip it entirely and still reach COMPLETED with control C03 left outstanding.
+  if (!o.skipCallback) await as(cust.accountOfficerId);
   const cb = {
     phoneCalled: cust.regPhone,
     callDate: isoDatePart(now),
     callTime: isoTimePart(now),
     officerId: cust.accountOfficerId,
   };
-  if (o.callbackFailFirst) {
+  if (o.callbackFailFirst && !o.skipCallback) {
     await S.callbacksService.log(t.id, {
       ...cb,
       amountOk: false,
@@ -191,22 +194,24 @@ async function runScenario(s: ScenarioCode, o: RunOpts = {}): Promise<TreasuryTx
       outcome: 'UNREACHABLE',
       notes: 'No answer',
     });
+    // The call-back is recorded but does not block: an unconfirmed one still lets the maker on.
     await as('TO');
-    await expectBlocked(
-      `${s}: cannot confirm Eazybankz before call-back`,
-      S.transactionsService.confirmCbs(t.id, { cbsSyncedAt: nowIso() })
-    );
+    const ctrl = db().controls.find((c) => c.txnId === t.id && c.controlCode === 'C03');
+    if (ctrl?.state === 'PENDING')
+      pass(`${s}: call-back stays outstanding after a failed call`, 'C03 PENDING');
+    else fail(`${s}: call-back stays outstanding after a failed call`, String(ctrl?.state));
     await as(cust.accountOfficerId);
   }
-  await S.callbacksService.log(t.id, {
-    ...cb,
-    amountOk: true,
-    instrOk: true,
-    benefOk: true,
-    purposeOk: true,
-    outcome: 'CONFIRMED',
-    notes: '',
-  });
+  if (!o.skipCallback)
+    await S.callbacksService.log(t.id, {
+      ...cb,
+      amountOk: true,
+      instrOk: true,
+      benefOk: true,
+      purposeOk: true,
+      outcome: 'CONFIRMED',
+      notes: '',
+    });
   await as('TO');
   await S.transactionsService.refreshFromCbs(t.id);
   await S.transactionsService.confirmCbs(t.id, {
@@ -268,7 +273,10 @@ async function runScenario(s: ScenarioCode, o: RunOpts = {}): Promise<TreasuryTx
   await as('TO');
   t = await S.transactionsService.confirmCompletion(t.id);
   const d = await S.transactionsService.get(t.id);
-  const notPassed = d.controls.filter((c) => c.state !== 'PASSED').map((c) => c.controlCode);
+  // A skipped call-back leaves C03 outstanding on purpose; every other control must pass.
+  const notPassed = d.controls
+    .filter((c) => c.state !== 'PASSED' && !(o.skipCallback && c.controlCode === 'C03'))
+    .map((c) => c.controlCode);
   if (notPassed.length) throw new Error(`${s}: controls not passed: ${notPassed.join(',')}`);
   if (d.vouchers.map((v) => v.voucherType).join('+') !== SCENARIO_META[s].vouchers.join('+'))
     throw new Error(`${s}: wrong vouchers`);
@@ -408,6 +416,87 @@ async function main() {
       : fail('Bulk approve', JSON.stringify(bulk.failed));
   } catch (e) {
     fail('Approval exceptions', (e as Error).message);
+  }
+
+  // 2b. The call-back never blocks, and a switched-off deduction must be explained.
+  try {
+    const t = await runScenario('TRANSFER_SS_PA', { skipCallback: true });
+    const c03 = db().controls.find((x) => x.txnId === t.id && x.controlCode === 'C03');
+    t.status === 'COMPLETED' && c03?.state === 'PENDING'
+      ? pass('Call-back does not block', `${t.txnRef} COMPLETED with C03 outstanding`)
+      : fail('Call-back does not block', `${t.status} · C03 ${c03?.state}`);
+  } catch (e) {
+    fail('Call-back does not block', (e as Error).message);
+  }
+
+  try {
+    await as('TO');
+    const subj = subjectFor('PRELIQ_FULL');
+    const t = await S.transactionsService.create({
+      scenarioCode: 'PRELIQ_FULL',
+      ...subj,
+      input: { valueDate: bizDay(), preliqChargeOn: false },
+    });
+    const prev = await S.transactionsService.preview(t.id, t.input);
+    prev.errors.preliqChargeOffReason
+      ? pass('Switching off a charge needs a reason', prev.errors.preliqChargeOffReason)
+      : fail('Switching off a charge needs a reason', 'no error raised');
+    const ok = await S.transactionsService.preview(t.id, {
+      ...t.input,
+      preliqChargeOffReason: 'Head of Treasury waived it',
+    });
+    ok.errors.preliqChargeOffReason
+      ? fail('A reason clears the error', ok.errors.preliqChargeOffReason)
+      : pass('A reason clears the error', 'voucher is valid');
+    await S.transactionsService.cancel(t.id, 'flow check');
+  } catch (e) {
+    fail('Switching off a charge needs a reason', (e as Error).message);
+  }
+
+  // 2c. Data import: Treasury uploads, Head of Treasury approves, records land.
+  try {
+    const to = await as('TO');
+    const before = db().holidays.length;
+    const batch = await S.importsService.create({
+      register: 'HOLIDAYS',
+      fileName: 'holidays.csv',
+      rows: [
+        { holidayDate: '2027-03-17', description: 'Flow check holiday' },
+        { holidayDate: '2027-03-18', description: 'Flow check holiday 2' },
+        { holidayDate: '2027-03-17', description: 'Duplicate of the first row' },
+      ],
+      rejectedRows: [],
+    });
+    batch.status === 'PENDING_APPROVAL'
+      ? pass('Import waits for approval', `${batch.batchRef} uploaded by ${to.fullName}`)
+      : fail('Import waits for approval', batch.status);
+    db().holidays.length === before
+      ? pass('Nothing is written before approval', `${before} holidays`)
+      : fail('Nothing is written before approval', String(db().holidays.length));
+
+    await expectBlocked(
+      'A Treasury Officer cannot approve an import',
+      S.importsService.decide(batch.id, 'APPROVE', { signatureName: to.fullName, pin: '1234' })
+    );
+
+    const ht = await as('HT');
+    const applied = await S.importsService.decide(batch.id, 'APPROVE', {
+      signatureName: ht.fullName,
+      pin: '1234',
+    });
+    applied.status === 'APPLIED' &&
+    applied.createdCount === 2 &&
+    db().holidays.length === before + 2
+      ? pass('Head of Treasury approves and the rows land', `${applied.createdCount} created`)
+      : fail(
+          'Head of Treasury approves and the rows land',
+          `${applied.status} · ${applied.createdCount} created`
+        );
+    applied.skippedRows.length === 1
+      ? pass('A duplicate row is skipped with a reason', applied.skippedRows[0].reason)
+      : fail('A duplicate row is skipped with a reason', JSON.stringify(applied.skippedRows));
+  } catch (e) {
+    fail('Data import', (e as Error).message);
   }
 
   // 3. Integrity.

@@ -17,6 +17,7 @@ export { vouchersService } from './vouchersService';
 export { approvalsService } from './approvalsService';
 export { operationsService } from './operationsService';
 export { callbacksService } from './callbacksService';
+export { importsService } from './importsService';
 export { notificationsService } from './notificationsService';
 export { auditService } from './auditService';
 export { reportsService, REPORTS, REPORT_ROLES } from './reportsService';

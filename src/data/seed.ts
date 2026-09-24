@@ -584,11 +584,26 @@ function populate(db: Db, T: string, anchor: string) {
     anniv: [] as Investment[],
     long: [] as Investment[],
   };
+  /**
+   * Business days inside a window from today. Maturities are only ever placed on these: a weekend
+   * or public holiday is moved to the next business day, which would push the investment out of
+   * the window the brief asks it to be in (e.g. a 7-day target landing on 1 October).
+   */
+  const windowDays = (from: number, to: number): string[] => {
+    const days: string[] = [];
+    for (let d = from; d <= to; d++) {
+      const date = addDays(T, d);
+      if (bizDay(date)) days.push(date);
+    }
+    return days.length ? days : [addDays(T, from)];
+  };
+  const within7 = windowDays(1, 7);
+  const within30 = windowDays(8, 30);
   for (let i = 0; i < 6; i++) buckets.today.push(mkInv({ customer: cust(), ...effFor(T) }));
   for (let i = 0; i < 18; i++)
-    buckets.next7.push(mkInv({ customer: cust(), ...effFor(addDays(T, 1 + (i % 7))) }));
+    buckets.next7.push(mkInv({ customer: cust(), ...effFor(within7[i % within7.length]) }));
   for (let i = 0; i < 30; i++)
-    buckets.next30.push(mkInv({ customer: cust(), ...effFor(addDays(T, 8 + (i % 23))) }));
+    buckets.next30.push(mkInv({ customer: cust(), ...effFor(within30[i % within30.length]) }));
   // 11: one is rolled over by a seeded transaction, leaving 10 awaiting instruction.
   for (let i = 0; i < 11; i++) {
     buckets.matured.push(

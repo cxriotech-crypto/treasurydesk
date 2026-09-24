@@ -82,11 +82,17 @@ export async function switchToName(page: Page, fullName: string) {
   ).toBeVisible();
 }
 
-/** Fill and submit the signature dialog. */
-export async function sign(page: Page, role: keyof typeof DEMO, action = 'Approve & sign') {
+/** Fill and submit the signature dialog, optionally leaving a note for the next approver. */
+export async function sign(
+  page: Page,
+  role: keyof typeof DEMO,
+  action = 'Approve & sign',
+  comment?: string
+) {
   const dialog = page.getByRole('dialog');
   await dialog.getByLabel('Full name').fill(NAMES[role]);
   await dialog.getByLabel('PIN').fill('1234');
+  if (comment) await dialog.getByLabel('Comment (optional)').fill(comment);
   await dialog.getByRole('button', { name: action }).click();
   await expect(dialog).toBeHidden({ timeout: 20_000 });
 }

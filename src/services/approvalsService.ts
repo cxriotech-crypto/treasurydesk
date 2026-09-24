@@ -1,11 +1,12 @@
 import type { ListQuery, ListResult, TreasuryTxn } from '@/domain/types';
-import { levelForRole, type ScenarioCode, type TxnType } from '@/domain/codes';
+import { APPROVAL_LEVELS, levelForRole, type ScenarioCode, type TxnType } from '@/domain/codes';
 import { minutesBetween, nowIso } from '@/lib/dates';
 import { add, ZERO } from '@/lib/money';
+import type { Db } from '@/data/db';
 import { getDb } from '@/data/store';
 import { AppError, paginate } from '@/data/repo';
 import { USE_MOCK, ctx, http, requireUser, run } from './core';
-import { filterTxns, type TxnRow } from './transactionsService';
+import { filterTxns, userName, type TxnRow } from './transactionsService';
 import * as wf from './workflow';
 
 export interface ApprovalFilters {
@@ -20,6 +21,14 @@ export interface ApprovalRow extends TxnRow {
   waitingMinutes: number;
   /** Why the signed-in user cannot approve (maker-checker etc.), or null. */
   blocker: string | null;
+  /** The note left by the last person who signed this round, for the approver receiving it. */
+  lastNote: ApprovalNote | null;
+}
+
+export interface ApprovalNote {
+  by: string;
+  position: string;
+  note: string;
 }
 
 export interface ApprovalQueue extends ListResult<ApprovalRow> {
@@ -44,6 +53,26 @@ export interface ApprovalsService {
 }
 
 const APPROVER_ROLES = ['HT', 'MIS', 'AUD', 'MD'] as const;
+
+/** Every note left by this round's signatures, oldest first, for whoever receives the file next. */
+export function approvalNotes(db: Db, txnId: string, cycleNo: number): ApprovalNote[] {
+  return db.approvals
+    .filter(
+      (a) =>
+        a.txnId === txnId && a.cycleNo === cycleNo && a.action === 'APPROVE' && a.comments.trim()
+    )
+    .sort((a, b) => a.levelNo - b.levelNo)
+    .map((a) => ({
+      by: userName(db, a.userId),
+      position: APPROVAL_LEVELS[a.levelNo - 1].label,
+      note: a.comments.trim(),
+    }));
+}
+
+function lastApprovalNote(db: Db, txnId: string, cycleNo: number): ApprovalNote | null {
+  const notes = approvalNotes(db, txnId, cycleNo);
+  return notes.length ? notes[notes.length - 1] : null;
+}
 
 export const mockApprovalsService: ApprovalsService = {
   queue: (q = {}) =>
@@ -70,6 +99,7 @@ export const mockApprovalsService: ApprovalsService = {
           ...r,
           waitingMinutes: minutesBetween(arrived ?? r.updatedAt, now),
           blocker: wf.approvalBlocker(db, r as TreasuryTxn, u),
+          lastNote: lastApprovalNote(db, r.id, r.cycleNo),
         };
       });
       const paged = paginate(rows, { sort: { field: 'waitingMinutes', dir: 'desc' }, ...q });
