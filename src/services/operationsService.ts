@@ -15,6 +15,10 @@ export interface OpsRow extends TxnRow {
   attempts: number;
   lastFailure: string | null;
   payoutAmt: string;
+  /** The posting keyed by the first officer, awaiting a second. */
+  prepared: { cbsPostingRef: string; preparedBy: string; preparedAt: string } | null;
+  /** Why the signed-in officer cannot approve the keyed posting, or null. */
+  approveBlocker: string | null;
 }
 
 export interface OpsQueue extends ListResult<OpsRow> {
@@ -29,14 +33,22 @@ export interface ExecuteResult {
 
 export interface OperationsService {
   queue(
-    q?: ListQuery<{ search?: string; status?: 'PENDING_OPERATIONS' | 'EXEC_FAILED' }>
+    q?: ListQuery<{
+      search?: string;
+      status?: 'PENDING_OPERATIONS' | 'PENDING_OPS_APPROVAL' | 'EXEC_FAILED';
+    }>
   ): Promise<OpsQueue>;
   /** Plain-language posting instructions for the Execute drawer. */
   instructions(txnId: string): Promise<string[]>;
-  /** Simulated GAPS submission (~2 s): fails gapsFailureRate% of the time. */
-  sendToGaps(txnId: string, cbsPostingRef: string, version?: number): Promise<ExecuteResult>;
-  /** Internal-only transactions: Eazybankz posting ref is enough. */
-  executeInternal(txnId: string, cbsPostingRef: string, version?: number): Promise<ExecuteResult>;
+  /** First officer: key the Eazybankz posting reference. Nothing is posted yet. */
+  prepare(txnId: string, cbsPostingRef: string, version?: number): Promise<TreasuryTxn>;
+  /**
+   * Second officer: approve the keyed posting, which executes it — sending it to GAPS (simulated,
+   * ~2 s, fails gapsFailureRate% of the time) where money leaves the bank.
+   */
+  approve(txnId: string, version?: number): Promise<ExecuteResult>;
+  /** Second officer: send the keyed posting back to be corrected. */
+  returnPosting(txnId: string, reason: string, version?: number): Promise<TreasuryTxn>;
 }
 
 function payoutOf(db: Db, t: TreasuryTxn): string {
@@ -106,6 +118,13 @@ function gapsRef(db: Db): string {
   return `GAPS-${d}-${String(nextCounter(db, 'gapsRef') % 1_000_000).padStart(6, '0')}`;
 }
 
+/** Whether approving will call GAPS (so the screen can show the 2-second wait). */
+function runNowGapsCheck(txnId: string): boolean {
+  const db = getDb();
+  const t = findById(db, 'txns', txnId);
+  return !!t && wf.gapsRequired(db, t);
+}
+
 function result(txnId: string): ExecuteResult {
   const db = getDb();
   const txn = getById(db, 'txns', txnId, 'transaction');
@@ -119,21 +138,33 @@ function result(txnId: string): ExecuteResult {
 export const mockOperationsService: OperationsService = {
   queue: (q = {}) =>
     run(() => {
-      requireUser();
+      const u = requireUser();
       const db = getDb();
       const f = q.filters ?? {};
       const rows: OpsRow[] = filterTxns(
         db,
-        { search: f.search, status: f.status ?? ['PENDING_OPERATIONS', 'EXEC_FAILED'] },
+        {
+          search: f.search,
+          status: f.status ?? ['PENDING_OPERATIONS', 'PENDING_OPS_APPROVAL', 'EXEC_FAILED'],
+        },
         nowIso()
       ).map((r) => {
         const ex = db.executions.filter((e) => e.txnId === r.id);
+        const prep = wf.preparedPosting(db, r.id);
         return {
           ...r,
           gapsRequired: wf.gapsRequired(db, r),
-          attempts: ex.length,
+          attempts: ex.filter((e) => e.status === 'SUCCESS' || e.status === 'FAILED').length,
           lastFailure: ex.filter((e) => e.status === 'FAILED').pop()?.failureReason ?? null,
           payoutAmt: payoutOf(db, r),
+          prepared: prep
+            ? {
+                cbsPostingRef: prep.cbsPostingRef ?? '',
+                preparedBy: findById(db, 'users', prep.executedBy)?.fullName ?? prep.executedBy,
+                preparedAt: prep.executedAt,
+              }
+            : null,
+          approveBlocker: wf.opsApprovalBlocker(db, r as TreasuryTxn, u),
         };
       });
       return {
@@ -151,42 +182,47 @@ export const mockOperationsService: OperationsService = {
         .flatMap((v) => describe(db, t, v));
       lines.push(
         wf.gapsRequired(db, t)
-          ? 'Enter the Eazybankz posting reference, then send the payment to GAPS.'
-          : 'Internal only: enter the Eazybankz posting reference to complete execution.'
+          ? 'Key the Eazybankz posting reference. A second Operations officer approves it, which sends the payment to GAPS.'
+          : 'Internal only: key the Eazybankz posting reference. A second Operations officer approves it to complete execution.'
       );
       return lines;
     }),
-  sendToGaps: async (txnId, cbsPostingRef, version) => {
-    if (typeof window !== 'undefined') await sleep(2000);
+  prepare: (txnId, cbsPostingRef, version) =>
+    run(() => wf.prepareExecution(ctx(['OPS']), txnId, cbsPostingRef, version)),
+  approve: async (txnId, version) => {
+    const needsGaps = runNowGapsCheck(txnId);
+    if (needsGaps && typeof window !== 'undefined') await sleep(2000);
     return runNow(() => {
       const c = ctx(['OPS']);
       const db = getDb();
-      const fail = Math.random() * 100 < db.settings.values.gapsFailureRate;
-      const outcome: wf.GapsOutcome = fail
-        ? {
-            ok: false,
-            reason:
-              wf.GAPS_FAILURE_REASONS[Math.floor(Math.random() * wf.GAPS_FAILURE_REASONS.length)],
-          }
-        : { ok: true, gapsRef: gapsRef(db) };
-      wf.execute(c, txnId, { cbsPostingRef, gaps: outcome }, version);
+      const t = getById(db, 'txns', txnId, 'transaction');
+      let outcome: wf.GapsOutcome | null = null;
+      if (wf.gapsRequired(db, t)) {
+        const fail = Math.random() * 100 < db.settings.values.gapsFailureRate;
+        outcome = fail
+          ? {
+              ok: false,
+              reason:
+                wf.GAPS_FAILURE_REASONS[Math.floor(Math.random() * wf.GAPS_FAILURE_REASONS.length)],
+            }
+          : { ok: true, gapsRef: gapsRef(db) };
+      }
+      wf.approveExecution(c, txnId, outcome, version);
       return result(txnId);
     });
   },
-  executeInternal: (txnId, cbsPostingRef, version) =>
-    run(() => {
-      wf.execute(ctx(['OPS']), txnId, { cbsPostingRef, gaps: null }, version);
-      return result(txnId);
-    }),
+  returnPosting: (txnId, reason, version) =>
+    run(() => wf.returnExecution(ctx(['OPS']), txnId, reason, version)),
 };
 
 export const httpOperationsService: OperationsService = {
   queue: (q) => http.get('/operations/queue', q as Record<string, unknown>),
   instructions: (txnId) => http.get(`/operations/${txnId}/instructions`),
-  sendToGaps: (txnId, cbsPostingRef, version) =>
-    http.post(`/operations/${txnId}/gaps`, { cbsPostingRef, version }),
-  executeInternal: (txnId, cbsPostingRef, version) =>
-    http.post(`/operations/${txnId}/execute`, { cbsPostingRef, version }),
+  prepare: (txnId, cbsPostingRef, version) =>
+    http.post(`/operations/${txnId}/prepare`, { cbsPostingRef, version }),
+  approve: (txnId, version) => http.post(`/operations/${txnId}/approve`, { version }),
+  returnPosting: (txnId, reason, version) =>
+    http.post(`/operations/${txnId}/return`, { reason, version }),
 };
 
 export const operationsService: OperationsService = USE_MOCK

@@ -53,30 +53,77 @@ export function Timeline({ d }: { d: TxnDetail }) {
     });
   for (const a of d.approvals) {
     const lvl = APPROVAL_LEVELS[a.levelNo - 1];
-    ev.push({
-      at: a.actedAt,
-      title:
-        a.action === 'APPROVE'
+    const paper = a.channel === 'PAPER';
+    const title =
+      a.action === 'RECALL'
+        ? 'Recalled by the maker'
+        : a.action === 'APPROVE'
           ? a.levelNo === 1
-            ? 'Signed and submitted'
-            : `Approved – ${lvl.label}`
+            ? a.cycleNo > 1
+              ? 'Corrected and resubmitted'
+              : 'Signed and submitted'
+            : `Approved – ${lvl.label}${paper ? ' (signed on paper)' : ''}`
           : a.action === 'RETURN'
             ? `Returned – ${lvl.label}`
-            : `Rejected – ${lvl.label}`,
-      by: a.userName,
-      tone: a.action === 'APPROVE' ? 'success' : a.action === 'RETURN' ? 'warning' : 'danger',
+            : `Rejected – ${lvl.label}`;
+    ev.push({
+      at: a.actedAt,
+      title: a.superseded ? `${title} — set aside after a recall` : title,
+      by: paper ? `${a.userName} (uploaded by ${d.maker.fullName})` : a.userName,
+      tone: a.superseded
+        ? 'neutral'
+        : a.action === 'APPROVE'
+          ? 'success'
+          : a.action === 'REJECT'
+            ? 'danger'
+            : 'warning',
       note: a.comments || undefined,
       cycle: a.cycleNo,
     });
   }
+  for (const r of d.recalls) {
+    ev.push({
+      at: r.requestedAt,
+      title: 'Recall requested',
+      by: `${r.requestedByName}, ${r.requestedByRole}`,
+      tone: 'warning',
+      note: r.reason,
+    });
+    if (r.decidedAt)
+      ev.push({
+        at: r.decidedAt,
+        title:
+          r.status === 'DECLINED'
+            ? 'Recall request declined'
+            : r.decision === 'TO_REQUESTER'
+              ? `Sent back to ${r.requestedByName}`
+              : 'Recalled at their request',
+        by: r.decidedByName ?? '',
+        tone: r.status === 'DECLINED' ? 'neutral' : 'warning',
+        note: r.decisionNote || undefined,
+      });
+  }
   for (const e of d.executions) {
     ev.push({
       at: e.executedAt,
-      title: e.status === 'SUCCESS' ? 'Executed by Operations' : 'GAPS submission failed',
+      title: 'Posting keyed by Operations',
       by: e.executedByName,
-      tone: e.status === 'SUCCESS' ? 'success' : 'danger',
-      note: [e.cbsPostingRef, e.gapsRef, e.failureReason].filter(Boolean).join(' · '),
+      tone: 'info',
+      note: e.cbsPostingRef ?? undefined,
     });
+    if (e.approvedAt)
+      ev.push({
+        at: e.approvedAt,
+        title:
+          e.status === 'SUCCESS'
+            ? 'Posting approved and executed'
+            : e.status === 'FAILED'
+              ? 'Approved; GAPS submission failed'
+              : 'Posting sent back',
+        by: e.approvedByName ?? '',
+        tone: e.status === 'SUCCESS' ? 'success' : e.status === 'FAILED' ? 'danger' : 'warning',
+        note: [e.gapsRef, e.failureReason].filter(Boolean).join(' · ') || undefined,
+      });
   }
   if (t.completedAt)
     ev.push({

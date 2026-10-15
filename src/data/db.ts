@@ -3,6 +3,7 @@ import type {
   Account,
   AppUser,
   Approval,
+  Attachment,
   AuditEvent,
   Bank,
   Beneficiary,
@@ -17,15 +18,17 @@ import type {
   Mandate,
   Notification,
   PublicHoliday,
+  RecallRequest,
   Signatory,
   SysSettingsRecord,
   TreasuryTxn,
+  TxnBatch,
   TxnComment,
   Verification,
   Voucher,
 } from '@/domain/types';
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export interface Db {
   schemaVersion: number;
@@ -54,6 +57,9 @@ export interface Db {
   notifications: Notification[];
   audit: AuditEvent[];
   imports: ImportBatch[];
+  attachments: Attachment[];
+  recalls: RecallRequest[];
+  batches: TxnBatch[];
   settings: SysSettingsRecord;
   holidays: PublicHoliday[];
   integrations: IntegrationConfig[];
@@ -91,6 +97,9 @@ export function emptyDb(settings: SysSettingsRecord, seedDate: string, seededAt:
     notifications: [],
     audit: [],
     imports: [],
+    attachments: [],
+    recalls: [],
+    batches: [],
     settings,
     holidays: [],
     integrations: [],

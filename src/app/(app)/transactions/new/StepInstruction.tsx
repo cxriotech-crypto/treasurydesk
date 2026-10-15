@@ -1,7 +1,7 @@
 'use client';
 
-import { useMemo, useRef, useState } from 'react';
-import { ArrowLeft, ArrowRight, FileUp, Search, Trash2 } from 'lucide-react';
+import { useMemo, useState } from 'react';
+import { ArrowLeft, ArrowRight, Search } from 'lucide-react';
 import type { AccountType, InstructionChannel, PayDestination } from '@/domain/codes';
 import { CHANNEL_LABELS, SCENARIO_META } from '@/domain/codes';
 import { INTERNAL_BANK_CODE } from '@/domain/rules';
@@ -28,10 +28,9 @@ import {
   TimeInput,
   toast,
 } from '@/components/ui';
-import { DocumentPreview } from '@/components/txn/Specimen';
+import { DocumentsInput, type DocItem } from '@/components/txn/Documents';
 import type { StepProps } from './Wizard';
 
-const MAX_UPLOAD = 1024 * 1024;
 /** Scenarios whose instructed amount is also the voucher amount. */
 const AMOUNT_DRIVES_INPUT = new Set([
   'INFLOW',
@@ -69,12 +68,22 @@ export function StepInstruction({ detail, goTo }: StepProps) {
   const [accountType, setAccountType] = useState<AccountType>(
     instruction?.accountType ?? 'SAVINGS'
   );
-  const [docName, setDocName] = useState(instruction?.documentName ?? null);
-  const [docData, setDocData] = useState(instruction?.documentData ?? null);
+  // Several documents can make up one instruction (a letter, its second page, an ID…).
+  const [docs, setDocs] = useState<DocItem[]>(() =>
+    detail.attachments
+      .filter((a) => a.kind === 'INSTRUCTION')
+      .map((a) => ({
+        id: a.id,
+        fileName: a.fileName,
+        mimeType: a.mimeType,
+        sizeBytes: a.sizeBytes,
+        dataUrl: a.dataUrl,
+        removable: true,
+      }))
+  );
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [enquiry, setEnquiry] = useState<string | null>(null);
-  const fileRef = useRef<HTMLInputElement>(null);
 
   const external = forcedExternal || (hasPayout && !internalTp && dest === 'EXTERNAL');
   const banks = useData(() => banksService.list({ filters: { active: true } }), []);
@@ -131,25 +140,6 @@ export function StepInstruction({ detail, goTo }: StepProps) {
     }
   };
 
-  const onFile = (f: File | undefined) => {
-    if (!f) return;
-    if (!/^(application\/pdf|image\/(png|jpe?g|webp))$/.test(f.type)) {
-      setErrors((e) => ({ ...e, document: 'Upload a PDF or an image (PNG, JPG)' }));
-      return;
-    }
-    if (f.size > MAX_UPLOAD) {
-      setErrors((e) => ({ ...e, document: 'File is larger than 1 MB' }));
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = () => {
-      setDocName(f.name);
-      setDocData(String(reader.result));
-      setErrors((e) => ({ ...e, document: '' }));
-    };
-    reader.readAsDataURL(f);
-  };
-
   const submit = async () => {
     setBusy('save');
     setErrors({});
@@ -160,8 +150,13 @@ export function StepInstruction({ detail, goTo }: StepProps) {
         receivedTime: time,
         amount,
         purpose,
-        documentName: docName,
-        documentData: docData,
+        documents: docs.map(({ id, fileName, mimeType, sizeBytes, dataUrl }) => ({
+          id,
+          fileName,
+          mimeType,
+          sizeBytes,
+          dataUrl,
+        })),
         payDestination: external ? 'EXTERNAL' : 'INTERNAL',
         benefName: external || internalTp ? benefName : null,
         bankCode: external ? bankCode : null,
@@ -222,45 +217,13 @@ export function StepInstruction({ detail, goTo }: StepProps) {
       </div>
 
       <div>
-        <p className="mb-1 text-[13px] font-medium text-muted">Instruction scan</p>
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-start">
-          <DocumentPreview name={docName} data={docData} />
-          <div className="flex gap-2 md:flex-col">
-            <input
-              ref={fileRef}
-              type="file"
-              accept="application/pdf,image/png,image/jpeg,image/webp"
-              className="sr-only"
-              aria-label="Upload instruction scan"
-              onChange={(e) => onFile(e.target.files?.[0])}
-            />
-            <Button icon={FileUp} onClick={() => fileRef.current?.click()}>
-              {docData ? 'Replace' : 'Upload'}
-            </Button>
-            {docData ? (
-              <Button
-                variant="ghost"
-                icon={Trash2}
-                onClick={() => {
-                  setDocData(null);
-                  setDocName(null);
-                  if (fileRef.current) fileRef.current.value = '';
-                }}
-              >
-                Remove
-              </Button>
-            ) : null}
-          </div>
-        </div>
-        <p
-          className={
-            errors.document
-              ? 'mt-1 text-xs font-medium text-st-danger-fg'
-              : 'mt-1 text-xs text-muted'
-          }
-        >
-          {errors.document || 'PDF or image, up to 1 MB. Stored with the transaction.'}
-        </p>
+        <p className="mb-2 text-[13px] font-medium text-muted">Instruction documents</p>
+        <DocumentsInput
+          value={docs}
+          onChange={setDocs}
+          label="Add instruction documents"
+          error={errors.documents}
+        />
       </div>
 
       {hasPayout ? (

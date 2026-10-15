@@ -2,25 +2,13 @@
 
 import { useState } from 'react';
 import { ArrowLeft, ArrowRight, OctagonX } from 'lucide-react';
-import { CHANNEL_LABELS, MANDATE_RULE_LABELS } from '@/domain/codes';
-import { formatDate, formatNaira } from '@/lib/format';
-import { customersService, transactionsService } from '@/services';
-import { useData } from '@/services/useData';
-import {
-  Button,
-  Checkbox,
-  ConfirmDialog,
-  DescriptionList,
-  InlineAlert,
-  SkeletonRows,
-  toast,
-} from '@/components/ui';
-import { DocumentPreview, SpecimenCard } from '@/components/txn/Specimen';
+import { transactionsService } from '@/services';
+import { Button, ConfirmDialog, InlineAlert, toast } from '@/components/ui';
+import { SignatureChecklist, SignatureComparison } from '@/components/txn/SignatureCheck';
 import type { StepProps } from './Wizard';
 
 export function StepSignature({ detail, goTo }: StepProps) {
-  const { txn, instruction, verification } = detail;
-  const cust = useData(() => customersService.get(txn.customerId), [txn.customerId]);
+  const { txn, verification } = detail;
   const [c, setC] = useState({
     sigOk: verification?.sigOk ?? false,
     mandateOk: verification?.mandateOk ?? false,
@@ -46,88 +34,10 @@ export function StepSignature({ detail, goTo }: StepProps) {
     }
   };
 
-  const sigs = cust.data?.signatories.filter((s) => s.active) ?? [];
-  const mandate = cust.data?.mandate;
-
   return (
     <div className="space-y-5">
-      <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
-        <section className="min-w-0 space-y-3">
-          <h3 className="text-[13px] font-semibold">Instruction received</h3>
-          <DocumentPreview
-            name={instruction?.documentName ?? null}
-            data={instruction?.documentData ?? null}
-          />
-          {instruction ? (
-            <DescriptionList
-              items={[
-                { label: 'Channel', value: CHANNEL_LABELS[instruction.channel] },
-                {
-                  label: 'Received',
-                  value: `${formatDate(instruction.receivedDate)} ${instruction.receivedTime}`,
-                },
-                {
-                  label: 'Amount',
-                  value: <span className="num">{formatNaira(instruction.amount)}</span>,
-                },
-                { label: 'Purpose', value: instruction.purpose },
-                ...(instruction.benefName
-                  ? [
-                      {
-                        label: 'Beneficiary',
-                        value: `${instruction.benefName} · ${instruction.accountNo}`,
-                      },
-                    ]
-                  : []),
-              ]}
-            />
-          ) : null}
-        </section>
-        <section className="min-w-0 space-y-3">
-          <h3 className="text-[13px] font-semibold">Specimen signatures on file</h3>
-          {cust.loading ? (
-            <SkeletonRows rows={3} />
-          ) : (
-            <>
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                {sigs.map((s) => (
-                  <SpecimenCard key={s.id} s={s} />
-                ))}
-              </div>
-              {mandate ? (
-                <InlineAlert tone="info" title="Mandate">
-                  {MANDATE_RULE_LABELS[mandate.ruleCode]}.
-                </InlineAlert>
-              ) : null}
-            </>
-          )}
-        </section>
-      </div>
-
-      <fieldset className="rounded-md border border-border p-3">
-        <legend className="px-1 text-[13px] font-semibold">Checks</legend>
-        <Checkbox
-          checked={c.sigOk}
-          onChange={(v) => setC({ ...c, sigOk: v })}
-          label="Signature matches the specimen"
-        />
-        <Checkbox
-          checked={c.mandateOk}
-          onChange={(v) => setC({ ...c, mandateOk: v })}
-          label="Signed according to the mandate"
-        />
-        <Checkbox
-          checked={c.ownershipOk}
-          onChange={(v) => setC({ ...c, ownershipOk: v })}
-          label="Account ownership confirmed"
-        />
-        <Checkbox
-          checked={c.completeOk}
-          onChange={(v) => setC({ ...c, completeOk: v })}
-          label="Instruction is complete"
-          description="Beneficiary name, bank, account number, amount and purpose where money leaves the bank"
-        />
-      </fieldset>
+      <SignatureComparison detail={detail} />
+      <SignatureChecklist value={c} onChange={setC} />
 
       {error ? <InlineAlert tone="danger">{error}</InlineAlert> : null}
 

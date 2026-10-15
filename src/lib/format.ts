@@ -3,7 +3,7 @@
  * date-time 22-Sep-2026 14:05 · durations 2h 14m.
  */
 import { D, dec, type Num } from './money';
-import { isoDatePart, isoTimePart, parseIso, toLagosIso } from './dates';
+import { dayOfWeek, isoDatePart, isoTimePart, parseIso, toLagosIso } from './dates';
 
 export const NAIRA = '₦';
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -68,6 +68,13 @@ export function formatDate(date: string | null | undefined): string {
 }
 
 /** ISO timestamp → "22-Sep-2026 14:05" (Lagos). */
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+/** "Saturday 18-Oct-2026" — a business date with its weekday, for prompts about dates. */
+export function formatDateWithDay(date: string): string {
+  return `${WEEKDAYS[dayOfWeek(date)]} ${formatDate(date)}`;
+}
+
 export function formatDateTime(iso: string | null | undefined): string {
   if (!iso) return '—';
   return `${formatDate(isoDatePart(iso))} ${isoTimePart(iso)}`;

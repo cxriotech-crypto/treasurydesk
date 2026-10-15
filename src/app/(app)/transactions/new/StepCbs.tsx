@@ -37,7 +37,7 @@ export function StepCbs({ detail, goTo }: StepProps) {
 
   const submit = async () => {
     if (!snap) {
-      if (already) goTo(6);
+      if (already) goTo(5);
       return;
     }
     setBusy(true);
@@ -49,7 +49,7 @@ export function StepCbs({ detail, goTo }: StepProps) {
         sourceConfirmed: source,
       });
       toast.success('Confirmed in Eazybankz');
-      goTo(6);
+      goTo(5);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -126,7 +126,7 @@ export function StepCbs({ detail, goTo }: StepProps) {
       {error ? <InlineAlert tone="danger">{error}</InlineAlert> : null}
 
       <div className="flex flex-col-reverse gap-2 border-t border-border pt-4 sm:flex-row sm:justify-between">
-        <Button icon={ArrowLeft} onClick={() => goTo(4)}>
+        <Button icon={ArrowLeft} onClick={() => goTo(3)}>
           Back
         </Button>
         <Button

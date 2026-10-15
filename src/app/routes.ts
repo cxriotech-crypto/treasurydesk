@@ -9,6 +9,7 @@ import {
   CalendarDays,
   ClipboardCheck,
   FileBarChart,
+  Layers,
   LayoutDashboard,
   PhoneCall,
   PlayCircle,
@@ -37,7 +38,8 @@ export interface RouteDef {
 }
 
 const ALL = ROLE_CODES;
-const APPROVERS: RoleCode[] = ['HT', 'MIS', 'AUD', 'MD'];
+// The Account Officer checks first (call-back + approve), then the four approval levels.
+const APPROVERS: RoleCode[] = ['AO', 'HT', 'MIS', 'AUD', 'MD'];
 
 export const ROUTES: RouteDef[] = [
   {
@@ -81,6 +83,20 @@ export const ROUTES: RouteDef[] = [
     nav: 'Work',
   },
   { path: '/transactions/[id]', label: 'Transaction', roles: ALL, ready: true },
+  {
+    path: '/batches',
+    label: 'Batches',
+    roles: ['TO', 'AO', 'HT', 'MIS', 'AUD', 'MD', 'OPS'],
+    ready: true,
+    icon: Layers,
+    nav: 'Work',
+  },
+  {
+    path: '/batches/[id]',
+    label: 'Batch',
+    roles: ['TO', 'AO', 'HT', 'MIS', 'AUD', 'MD', 'OPS'],
+    ready: true,
+  },
   {
     path: '/approvals',
     label: 'Approvals',

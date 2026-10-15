@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useMemo, useState } from 'react';
 import { PenLine } from 'lucide-react';
 import { TXN_TYPES, TXN_TYPE_META, scenarioLabel, type TxnType } from '@/domain/codes';
@@ -56,6 +57,23 @@ export default function ApprovalsPage() {
 
   const columns: Column<ApprovalRow>[] = [
     { key: 'ref', header: 'Reference', cell: (r) => r.txnRef, sortKey: 'txnRef', card: 'title' },
+    {
+      key: 'batch',
+      header: 'Batch',
+      cardLabel: 'Batch',
+      cell: (r) =>
+        r.batchRef && r.batchId ? (
+          <Link
+            href={`/batches/${r.batchId}`}
+            className="text-xs font-medium text-brand hover:underline"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {r.batchRef}
+          </Link>
+        ) : (
+          <span className="text-xs text-muted">—</span>
+        ),
+    },
     { key: 'sla', header: 'SLA', cell: (r) => <SlaBadge sla={live(r)} />, card: 'status' },
     {
       key: 'customer',
@@ -96,10 +114,14 @@ export default function ApprovalsPage() {
       key: 'check',
       header: 'Can sign',
       cell: (r) =>
-        r.blocker ? (
-          <Tooltip content={r.blocker}>
-            <span className="text-xs text-st-warning-fg" tabIndex={0} aria-label={r.blocker}>
-              Blocked
+        r.blocker || r.approveReady ? (
+          <Tooltip content={(r.blocker ?? r.approveReady)!}>
+            <span
+              className="text-xs text-st-warning-fg"
+              tabIndex={0}
+              aria-label={(r.blocker ?? r.approveReady)!}
+            >
+              {r.blocker ? 'Blocked' : 'Not yet'}
             </span>
           </Tooltip>
         ) : (
@@ -120,7 +142,11 @@ export default function ApprovalsPage() {
     <>
       <PageHeader
         title={q.data ? `Approvals · ${q.data.levelLabel}` : 'Approvals'}
-        description="Transactions waiting for your signature. Open one to review it in full."
+        description={
+          q.data?.levelLabel === 'Account Officer'
+            ? 'Your customers’ transactions, submitted by Treasury. Call the customer, then approve, return or reject.'
+            : 'Transactions waiting for your signature. Open one to review it in full, or a batch to decide on several together.'
+        }
         actions={
           <Button
             variant="primary"
@@ -167,7 +193,7 @@ export default function ApprovalsPage() {
         selectable
         selected={selected}
         onSelectedChange={setSelected}
-        isSelectable={(r) => !r.blocker}
+        isSelectable={(r) => !r.blocker && !r.approveReady}
         empty={{
           title: 'Nothing waiting for you',
           description: 'New items appear here as soon as the previous level signs.',

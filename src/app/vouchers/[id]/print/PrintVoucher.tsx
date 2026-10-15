@@ -113,6 +113,40 @@ export function PrintVoucher() {
             ))}
           </section>
 
+          {p.previousInvestment ? (
+            <section className="mt-3 border border-zinc-900">
+              <p className="border-b border-zinc-900 bg-zinc-100 px-2 py-1 text-[10px] font-bold uppercase tracking-wide">
+                Previous investment
+              </p>
+              <div className="grid grid-cols-4">
+                {[
+                  ['Reference', p.previousInvestment.investmentRef],
+                  ['Principal', formatNaira(p.previousInvestment.principalAmt)],
+                  ['Rate', `${p.previousInvestment.intRate}% p.a.`],
+                  ['Product', p.previousInvestment.productCode],
+                  ['Effective date', formatDate(p.previousInvestment.effectiveDate)],
+                  ['Tenor', `${p.previousInvestment.tenorDays} days`],
+                  ['Maturity date', formatDate(p.previousInvestment.maturityDate)],
+                  ['Interest paid to date', formatNaira(p.previousInvestment.intPaidToDate)],
+                ].map(([k, val], i) => (
+                  <div
+                    key={k}
+                    className={`p-1.5 ${i % 4 < 3 ? 'border-r border-zinc-900' : ''} ${i >= 4 ? 'border-t border-zinc-900' : ''}`}
+                  >
+                    <p className="text-[9px] uppercase tracking-wide text-zinc-600">{k}</p>
+                    <p className="num font-semibold">{val}</p>
+                  </div>
+                ))}
+              </div>
+              <p className="border-t border-zinc-900 px-2 py-1 text-[10px]">
+                Interest accrued to {formatDate(p.previousInvestment.accruedTo)}:{' '}
+                <span className="num font-semibold">
+                  {formatNaira(p.previousInvestment.accruedInterest)}
+                </span>
+              </p>
+            </section>
+          ) : null}
+
           <section className="mt-3 border border-zinc-900">
             {v.rows.map((r, i) => (
               <div
@@ -172,11 +206,11 @@ export function PrintVoucher() {
             ) : null}
           </section>
 
-          <section className="mt-3 grid grid-cols-5 border border-zinc-900">
+          <section className="mt-3 grid grid-cols-6 border border-zinc-900">
             {p.signatures.map((s, i) => (
               <div
                 key={s.levelNo}
-                className={`flex min-h-[70px] flex-col justify-between p-1.5 ${i < 4 ? 'border-r border-zinc-900' : ''}`}
+                className={`flex min-h-[70px] flex-col justify-between p-1.5 ${i < p.signatures.length - 1 ? 'border-r border-zinc-900' : ''}`}
               >
                 <p className="text-[9px] font-bold uppercase tracking-wide">{s.roleLabel}</p>
                 {s.signerName ? (
@@ -206,9 +240,9 @@ export function PrintVoucher() {
                 p.execution?.gapsRef ?? (p.execution ? 'Internal – not applicable' : '—'),
               ],
               [
-                'Executed by (Operations)',
+                'Keyed / approved (Operations)',
                 p.execution
-                  ? `${p.execution.executedByName} · ${formatDateTime(p.execution.executedAt)}`
+                  ? `${p.execution.executedByName} / ${p.execution.approvedByName ?? '—'}`
                   : 'Pending',
               ],
             ].map(([k, val], i) => (

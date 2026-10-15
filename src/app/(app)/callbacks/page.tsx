@@ -145,7 +145,7 @@ export default function CallbacksPage() {
     <>
       <PageHeader
         title="Call-backs"
-        description="Every customer confirmation call, and the calls still waiting."
+        description="Every customer confirmation call, and the submitted transactions still waiting for one. A confirmed call lets the Account Officer approve the transaction."
       />
 
       <Card className="mb-5">
@@ -153,7 +153,7 @@ export default function CallbacksPage() {
           title="Waiting for a call"
           description={
             queue.data
-              ? `${queue.data.length} transaction${queue.data.length === 1 ? '' : 's'} in verification`
+              ? `${queue.data.length} submitted transaction${queue.data.length === 1 ? '' : 's'} waiting for the Account Officer's call`
               : undefined
           }
         />

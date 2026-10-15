@@ -2,6 +2,7 @@ import type {
   Account,
   AppUser,
   Approval,
+  Attachment,
   AuditEvent,
   CallbackLog,
   ControlCheck,
@@ -11,7 +12,10 @@ import type {
   Investment,
   ListQuery,
   ListResult,
+  RecallDecision,
+  RecallRequest,
   TreasuryTxn,
+  TxnBatch,
   TxnComment,
   TxnInput,
   Verification,
@@ -19,6 +23,8 @@ import type {
 } from '@/domain/types';
 import {
   CONTROL_LABELS,
+  RECALLABLE_STATUSES,
+  ROLE_LABELS,
   TXN_STATUSES,
   TXN_STATUS_META,
   levelForStatus,
@@ -63,6 +69,7 @@ export interface TxnRow extends TreasuryTxn {
   makerName: string;
   sla: SlaState | null;
   investmentRef: string | null;
+  batchRef: string | null;
 }
 
 export type StageState = 'done' | 'current' | 'todo' | 'failed';
@@ -79,11 +86,26 @@ export interface TxnActions {
   continueDraft: string | null;
   cancel: string | null;
   stop: string | null;
+  /** Who can act at this approval step (return and reject use this too). */
   approve: string | null;
+  /** What must happen before this step can approve: the AO's confirmed call, Audit's check. */
+  approveReady: string | null;
+  /** Operations, first officer: key the posting. */
   execute: string | null;
+  /** Operations, second officer: approve the keyed posting. */
+  opsApprove: string | null;
   confirm: string | null;
   reverse: string | null;
   logCallback: string | null;
+  /** Internal Audit re-verifies the signature. */
+  auditVerify: string | null;
+  /** The maker uploads a paper signature for the level now waiting. */
+  paperSign: string | null;
+  /** The maker recalls the transaction. */
+  recall: string | null;
+  /** Anyone else asks the maker to recall it. */
+  requestRecall: string | null;
+  addDocuments: string | null;
 }
 
 export interface NamedApproval extends Approval {
@@ -102,7 +124,19 @@ export interface NamedComment extends TxnComment {
 }
 export interface NamedExecution extends Execution {
   executedByName: string;
+  approvedByName: string | null;
   confirmedByName: string | null;
+}
+export interface NamedAttachment extends Attachment {
+  uploadedByName: string;
+  mine: boolean;
+}
+export interface NamedRecall extends RecallRequest {
+  requestedByName: string;
+  requestedByRole: string;
+  decidedByName: string | null;
+  /** Why it cannot go back to the person who asked, or null when it can. */
+  toRequesterBlocker: string | null;
 }
 export interface NamedAudit extends AuditEvent {
   userName: string;
@@ -125,6 +159,13 @@ export interface TxnDetail {
   executions: NamedExecution[];
   controls: NamedControl[];
   comments: NamedComment[];
+  attachments: NamedAttachment[];
+  recalls: NamedRecall[];
+  batch: Pick<TxnBatch, 'id' | 'batchRef'> | null;
+  /** Internal Audit has re-verified the signature in this cycle. */
+  auditVerified: boolean;
+  /** People who can be named on a paper signature for the level now waiting. */
+  paperSigners: { id: string; fullName: string }[];
   audit: NamedAudit[];
   reversalOf: Pick<TreasuryTxn, 'id' | 'txnRef'> | null;
   reversedBy: Pick<TreasuryTxn, 'id' | 'txnRef'> | null;
@@ -171,6 +212,21 @@ export interface TransactionsService {
   refreshFromCbs(id: string): Promise<CbsSnapshot>;
   confirmCbs(id: string, data: wf.CbsConfirmation): Promise<TreasuryTxn>;
   signAndSubmit(id: string, sign: wf.SignArgs, version?: number): Promise<TreasuryTxn>;
+  auditVerify(id: string, checks: wf.SignatureChecks): Promise<TreasuryTxn>;
+  recordPaperApproval(
+    id: string,
+    args: wf.PaperApprovalArgs,
+    version?: number
+  ): Promise<TreasuryTxn>;
+  recall(id: string, reason: string, version?: number): Promise<TreasuryTxn>;
+  requestRecall(id: string, reason: string): Promise<RecallRequest>;
+  decideRecall(
+    requestId: string,
+    decision: RecallDecision | 'DECLINE',
+    note: string
+  ): Promise<RecallRequest>;
+  addDocuments(id: string, files: wf.AttachmentInput[]): Promise<Attachment[]>;
+  removeDocument(attachmentId: string): Promise<void>;
   cancel(id: string, reason: string, version?: number): Promise<TreasuryTxn>;
   confirmCompletion(id: string, version?: number): Promise<TreasuryTxn>;
   raiseReversal(originalTxnId: string, input?: TxnInput): Promise<TreasuryTxn>;
@@ -198,6 +254,7 @@ export function toTxnRow(db: Db, t: TreasuryTxn, now: string): TxnRow {
     makerName: userName(db, t.makerId),
     sla: slaState(t.slaDueAt, now, t.completedAt),
     investmentRef: findById(db, 'investments', t.investmentId)?.investmentRef ?? null,
+    batchRef: findById(db, 'batches', t.batchId)?.batchRef ?? null,
   };
 }
 
@@ -235,9 +292,9 @@ function stagesOf(db: Db, t: TreasuryTxn): Stage[] {
   const defs: [string, string, ControlCode][] = [
     ['instruction', 'Instruction', 'C01'],
     ['verification', 'Verification', 'C02'],
-    ['callback', 'Call-back', 'C03'],
     ['cbs', 'Eazybankz', 'C04'],
     ['voucher', 'Voucher', 'C06'],
+    ['callback', 'Account Officer', 'C03'],
     ['ht', 'Head Treasury', 'C07'],
     ['mis', 'MIS', 'C08'],
     ['audit', 'Audit', 'C09'],
@@ -278,10 +335,17 @@ export function actionsFor(db: Db, t: TreasuryTxn, u: AppUser | null): TxnAction
       cancel: x,
       stop: x,
       approve: x,
+      approveReady: x,
       execute: x,
+      opsApprove: x,
       confirm: x,
       reverse: x,
       logCallback: x,
+      auditVerify: x,
+      paperSign: x,
+      recall: x,
+      requestRecall: x,
+      addDocuments: x,
     };
   }
   const editable = wf.EDITABLE_STATUSES.includes(t.status);
@@ -302,15 +366,21 @@ export function actionsFor(db: Db, t: TreasuryTxn, u: AppUser | null): TxnAction
   const openReversal = db.txns.some(
     (x) => x.reversalOfTxnId === t.id && wf.LOCKING_STATUSES.includes(x.status)
   );
+  const cust = findById(db, 'customers', t.customerId);
   let callbackWhy: string | null = null;
-  if (!['VERIFICATION', 'RETURNED'].includes(t.status))
-    callbackWhy = 'Call-backs are logged during verification';
-  else if (c('C02') !== 'PASSED') callbackWhy = 'Verify the signature first';
-  else if (c('C03') === 'PASSED') callbackWhy = 'Call-back already confirmed';
-  else if (u.roleCode === 'AO') {
-    const cust = findById(db, 'customers', t.customerId);
-    if (cust?.accountOfficerId !== u.id) callbackWhy = 'Not your customer';
-  } else callbackWhy = 'The customer call-back is made by the Account Officer';
+  if (u.roleCode !== 'AO') callbackWhy = 'The customer call-back is made by the Account Officer';
+  else if (cust?.accountOfficerId !== u.id) callbackWhy = 'Not your customer';
+  else if (t.status !== 'PENDING_ACCOUNT_OFFICER')
+    callbackWhy = 'The call is made once the Treasury Officer has submitted';
+  else if (wf.currentCall(db, t)?.outcome === 'CONFIRMED')
+    callbackWhy = 'The customer has confirmed — approve when ready';
+
+  const level = levelForStatus(t.status);
+  const approveWho = wf.approvalBlocker(db, t, u);
+  const recallable = RECALLABLE_STATUSES.includes(t.status);
+  const pendingMine = db.recalls.some(
+    (r) => r.txnId === t.id && r.requestedBy === u.id && r.status === 'PENDING'
+  );
 
   return {
     continueDraft: makerOnly(editable, 'Transaction is no longer editable'),
@@ -319,15 +389,17 @@ export function actionsFor(db: Db, t: TreasuryTxn, u: AppUser | null): TxnAction
       'Only drafts, in-verification and returned transactions can be cancelled'
     ),
     stop: makerOnly(['DRAFT', 'VERIFICATION', 'RETURNED'].includes(t.status), 'Too late to stop'),
-    approve: wf.approvalBlocker(db, t, u),
+    approve: approveWho,
+    approveReady: approveWho ? null : wf.approveRequirement(db, t),
     execute:
       u.roleCode !== 'OPS'
-        ? 'Only Operations can execute'
+        ? 'Only Operations can key a posting'
         : !['PENDING_OPERATIONS', 'EXEC_FAILED'].includes(t.status)
-          ? 'Not ready for execution'
+          ? 'Not ready for Operations'
           : isMaker
             ? 'Maker-checker: you created this transaction'
             : null,
+    opsApprove: wf.opsApprovalBlocker(db, t, u),
     confirm:
       u.roleCode !== 'TO'
         ? 'Only a Treasury Officer can confirm'
@@ -349,6 +421,31 @@ export function actionsFor(db: Db, t: TreasuryTxn, u: AppUser | null): TxnAction
                   ? 'The investment it created is no longer active'
                   : null,
     logCallback: callbackWhy,
+    auditVerify:
+      u.roleCode !== 'AUD'
+        ? 'Only Internal Audit re-verifies the signature'
+        : t.status !== 'PENDING_AUDIT'
+          ? 'Not with Internal Audit'
+          : wf.auditVerified(db, t)
+            ? 'Already verified in this round'
+            : null,
+    paperSign: makerOnly(!!level, 'Nothing is waiting for an approver'),
+    recall: makerOnly(recallable, 'Only submitted transactions not yet executed can be recalled'),
+    requestRecall: isMaker
+      ? 'You created this transaction — recall it yourself'
+      : !['AO', 'HT', 'MIS', 'AUD', 'MD', 'OPS'].includes(u.roleCode)
+        ? 'Your role cannot request a recall'
+        : !recallable
+          ? 'Only submitted transactions not yet executed can be recalled'
+          : pendingMine
+            ? 'You have already asked for a recall'
+            : null,
+    addDocuments:
+      u.roleCode === 'ADM'
+        ? 'Administrators do not work on transactions'
+        : u.roleCode === 'AO' && cust?.accountOfficerId !== u.id
+          ? 'Not your customer'
+          : null,
   };
 }
 
@@ -361,6 +458,8 @@ function relatedIds(db: Db, t: TreasuryTxn): Set<string> {
     'executions',
     'comments',
     'vouchers',
+    'attachments',
+    'recalls',
   ] as const) {
     for (const r of db[table] as { id: string; txnId: string }[])
       if (r.txnId === t.id) ids.add(r.id);
@@ -422,6 +521,7 @@ function detail(db: Db, id: string): TxnDetail {
       .map((e) => ({
         ...e,
         executedByName: userName(db, e.executedBy),
+        approvedByName: e.approvedBy ? userName(db, e.approvedBy) : null,
         confirmedByName: e.confirmedBy ? userName(db, e.confirmedBy) : null,
       })),
     controls: db.controls
@@ -436,6 +536,46 @@ function detail(db: Db, id: string): TxnDetail {
       .filter((c) => c.txnId === t.id)
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
       .map((c) => ({ ...c, userName: userName(db, c.userId), mine: !!u && c.userId === u.id })),
+    attachments: db.attachments
+      .filter((a) => a.txnId === t.id)
+      .sort((a, b) => a.uploadedAt.localeCompare(b.uploadedAt))
+      .map((a) => ({
+        ...a,
+        uploadedByName: userName(db, a.uploadedBy),
+        mine: !!u && a.uploadedBy === u.id,
+      })),
+    recalls: db.recalls
+      .filter((r) => r.txnId === t.id)
+      .sort((a, b) => b.requestedAt.localeCompare(a.requestedAt))
+      .map((r) => {
+        const who = findById(db, 'users', r.requestedBy);
+        return {
+          ...r,
+          requestedByName: who?.fullName ?? r.requestedBy,
+          requestedByRole: who ? ROLE_LABELS[who.roleCode] : '',
+          decidedByName: r.decidedBy ? userName(db, r.decidedBy) : null,
+          toRequesterBlocker: who ? wf.recallToRequesterBlocker(db, t, who) : 'Unknown user',
+        };
+      }),
+    batch: (() => {
+      const b = findById(db, 'batches', t.batchId);
+      return b ? { id: b.id, batchRef: b.batchRef } : null;
+    })(),
+    auditVerified: wf.auditVerified(db, t),
+    paperSigners: (() => {
+      const lvl = levelForStatus(t.status);
+      if (!lvl) return [];
+      const owner = findById(db, 'customers', t.customerId)?.accountOfficerId;
+      return db.users
+        .filter(
+          (x) =>
+            x.status === 'ACTIVE' &&
+            x.roleCode === lvl.roleCode &&
+            (lvl.roleCode !== 'AO' || x.id === owner) &&
+            !wf.approvalBlocker(db, t, x)
+        )
+        .map((x) => ({ id: x.id, fullName: x.fullName }));
+    })(),
     audit: txnAudit(db, t),
     reversalOf: origTxn ? { id: origTxn.id, txnRef: origTxn.txnRef } : null,
     reversedBy: revBy ? { id: revBy.id, txnRef: revBy.txnRef } : null,
@@ -566,6 +706,15 @@ export const mockTransactionsService: TransactionsService = {
 
   confirmCbs: (id, data) => run(() => wf.confirmCbs(ctx(['TO']), id, data)),
   signAndSubmit: (id, sign, version) => run(() => wf.signAndSubmit(ctx(['TO']), id, sign, version)),
+  auditVerify: (id, checks) => run(() => wf.auditVerify(ctx(['AUD']), id, checks)),
+  recordPaperApproval: (id, args, version) =>
+    run(() => wf.recordPaperApproval(ctx(['TO']), id, args, version)),
+  recall: (id, reason, version) => run(() => wf.recall(ctx(['TO']), id, reason, version)),
+  requestRecall: (id, reason) => run(() => wf.requestRecall(ctx(), id, reason)),
+  decideRecall: (requestId, decision, note) =>
+    run(() => wf.decideRecall(ctx(['TO']), requestId, decision, note)),
+  addDocuments: (id, files) => run(() => wf.addSupportingDocuments(ctx(), id, files)),
+  removeDocument: (attachmentId) => run(() => wf.removeSupportingDocument(ctx(), attachmentId)),
   cancel: (id, reason, version) => run(() => wf.cancel(ctx(['TO']), id, reason, version)),
   confirmCompletion: (id, version) => run(() => wf.confirmCompletion(ctx(['TO']), id, version)),
   raiseReversal: (originalTxnId, input) =>
@@ -596,6 +745,15 @@ export const httpTransactionsService: TransactionsService = {
   confirmCbs: (id, data) => http.post(`/transactions/${id}/cbs-confirmation`, data),
   signAndSubmit: (id, sign, version) =>
     http.post(`/transactions/${id}/submit`, { ...sign, version }),
+  auditVerify: (id, checks) => http.post(`/transactions/${id}/audit-verification`, checks),
+  recordPaperApproval: (id, args, version) =>
+    http.post(`/transactions/${id}/paper-approval`, { ...args, version }),
+  recall: (id, reason, version) => http.post(`/transactions/${id}/recall`, { reason, version }),
+  requestRecall: (id, reason) => http.post(`/transactions/${id}/recall-requests`, { reason }),
+  decideRecall: (requestId, decision, note) =>
+    http.post(`/recall-requests/${requestId}/decision`, { decision, note }),
+  addDocuments: (id, files) => http.post(`/transactions/${id}/documents`, { files }),
+  removeDocument: (attachmentId) => http.del(`/documents/${attachmentId}`, {}),
   cancel: (id, reason, version) => http.post(`/transactions/${id}/cancel`, { reason, version }),
   confirmCompletion: (id, version) => http.post(`/transactions/${id}/confirm`, { version }),
   raiseReversal: (originalTxnId, input) =>

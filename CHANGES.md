@@ -27,24 +27,52 @@ The user menu switches between the demo users in one click.
 
 ## What the demo covers
 
-- **All 15 SOP scenarios** run end to end: instruction → signature verification → customer call-back →
-  Eazybankz check → voucher(s) → five signatures → Operations execution → Treasury confirmation.
+- **All 15 SOP scenarios** run end to end. The Treasury Officer prepares everything — instruction, signature
+  verification, Eazybankz check and the full voucher (new rate, tenor and so on) — and signs. It then goes to
+  the customer's **Account Officer**, then Head of Treasury → MIS → Internal Audit → MD → Operations (two
+  officers) → Treasury confirmation. Six signatures in all.
 - **Maker-checker throughout.** The Treasury Officer who raises a transaction can never approve it, and no user
   signs the same transaction twice. Blocked buttons say why.
-- **The customer call-back belongs to the Account Officer** (SOP step 3). Only the officer the customer belongs
-  to can make and log it; they are notified as soon as the signature is verified. It is **recorded but not
-  enforced**: a transaction can go on to the voucher and through approval with the call-back still outstanding,
-  and everyone who opens it — including all five approvers — sees a warning until the customer confirms. This
-  is a deliberate demo decision; the SOP's control checklist requires the call before processing.
+- **The Account Officer is the checker** (SOP step 3). Once the Treasury Officer submits, the customer's own
+  Account Officer is notified, calls the customer on the registered number, logs the call, and then approves
+  (on to Head of Treasury), returns it to the maker, or rejects it. They cannot approve until the customer has
+  confirmed on a call logged in that round.
+- **Batches.** The Treasury Officer can tick several ready transactions and submit them together with one
+  signature (Work → Batches → New batch). At every level the approver opens the batch, decides item by item —
+  approve, return or reject, with a reason for the last two — and signs once. Approved items move on; returned
+  and rejected ones go back to the maker. The batch keeps a record of where each item is.
+- **A return starts the chain again.** A returned (or recalled) transaction comes back to the Treasury Officer,
+  stays editable, and on resubmission goes through every level again from the Account Officer, with earlier
+  signatures kept in the history but no longer counting.
+- **Recall.** The Treasury Officer can recall a submitted transaction at any point before Operations execute it.
+  Anyone else involved can *request* a recall; the Treasury Officer then brings it back to themselves, sends it
+  back to the person who asked (the signatures from their level on are set aside and they decide again), or
+  declines with a reason.
+- **Internal Audit re-verifies the signature.** Audit sees exactly what the Treasury Officer saw — the
+  instruction documents beside the specimen signatures and the mandate — and ticks the same four checks before
+  they can sign.
+- **Operations, two people.** One Operations officer keys the Eazybankz posting reference; a different officer
+  approves it, and only then is it executed (posted, and sent to GAPS where money leaves the bank). The second
+  officer can also send a keyed posting back to be corrected. A failed GAPS payment is keyed and approved again.
+- **Paper signatures.** If an approver cannot use TreasuryDesk, the Treasury Officer prints the voucher, has it
+  signed by hand, and uploads the signed copy for that step, naming who signed and why. The step is recorded in
+  the approver's name, marked "signed on paper", with the scan attached and an audit entry.
+- **Several documents everywhere.** The instruction can have several documents, a paper signature several
+  pages, and every transaction has a Documents tab where anyone working on it can add supporting documents,
+  several at a time (PDF, PNG or JPEG, up to 1 MB each).
+- **Weekend maturities are caught.** When a new maturity date would fall on a weekend or public holiday, the
+  voucher asks: move it to the next business day (the tenor is adjusted for you), or pick another date. It
+  cannot be signed until the date is a business day.
 - **Withholding tax and the pre-liquidation charge can each be switched off per transaction**, on the voucher
   step. Switching one off requires a typed reason, the same way stop, return and reject do. The reason prints
   on the voucher beneath the row it explains and is kept in the audit trail. A WHT-exempt customer locks the
   tax switch off and says why.
-- **Returns, rejections, stops, failed call-backs and GAPS failures** all behave as the SOP describes, including
-  retrying a failed GAPS submission and resubmission after a return (earlier approval rounds stay in history).
+- **Returns, rejections, stops, failed call-backs and GAPS failures** all behave as the SOP describes.
 - **Every figure is calculated** by `src/lib/calc.ts` with decimal.js. Hovering the "fx" marker shows the formula
   with the real numbers. Changing a rate in Settings recalculates open drafts.
-- **Printable A4 vouchers** with amount in words, payment instruction, five signature boxes and the Operations box.
+- **Printable A4 vouchers** with the previous investment that leads to the new one (reference, principal, rate,
+  dates, tenor, interest paid and interest accrued), amount in words, payment instruction, six signature boxes
+  and the Operations box showing who keyed and who approved the posting.
 - **Registers**: investments (live accrued interest), customers (full CRUD with signatories, mandate, accounts and
   beneficiaries), calendar, call-back log, notifications.
 - **Data import** (Treasury → Data import): load customers, accounts, investments, beneficiaries, banks or public
@@ -80,8 +108,9 @@ next role. Swapping `NEXT_PUBLIC_USE_MOCK=false` points the same screens at the 
 ## Demo data
 
 Rebuilt for "today" on first load each day, so it never goes stale: 40 customers, 80 accounts, 120 investments,
-20 banks, 25 beneficiaries, public holidays, and 60 transactions covering every status and every type (at least 8
-waiting at each approval level, 3 SLA breaches, returns, rejections, stops and GAPS failures). Settings → Demo
+20 banks, 25 beneficiaries, public holidays, and 74 transactions covering every status and every type (at least 8
+waiting at each of the five approval levels, 3 SLA breaches, returns, rejections, stops, GAPS failures, two
+batches, a recall, a pending recall request, paper signatures and postings awaiting a second Operations officer). Settings → Demo
 resets it, changes the simulated latency, or forces GAPS failures.
 
 ## Decisions worth confirming with the client
@@ -89,11 +118,14 @@ resets it, changes the simulated latency, or forces GAPS failures.
 - The rates and policies in Settings are the brief's defaults and remain assumptions: WHT 10%, pre-liquidation
   charge 20%, transfer fee 0.10%, 365-day basis, no WHT on anniversary interest, interest not paid on partial
   pre-liquidation, SLA 8 hours with a 15:00 cut-off.
-- Maturities falling on a weekend or public holiday move to the next business day.
+- A new maturity on a weekend or public holiday is caught and the user is asked to move it. Investments loaded
+  through Data import keep the automatic move to the next business day, since they come from existing records.
 - Eid holiday dates are estimates and are editable in Settings.
 - Account Officers only see transactions, investments and call-backs for their own customers, and only they can
   log a call-back — there is no cover path for an officer on leave, so confirm how absence is handled.
 - The pre-liquidation charge is a flat 20% of accrued interest. The SOP lists the charges as "30 Days, 60 Days,
   90 Days" without rates; if the charge is tiered by how early the investment is broken, the tiers are needed.
-- The call-back is recorded but does not block any transaction. Confirm whether it should block in production.
+- A paper signature is uploaded by the Treasury Officer — the maker — on the approver's behalf, as asked. It is
+  named, evidenced by the scan and audited, but it does let the maker complete someone else's step. Confirm
+  whether a second person (for example Head of Treasury) should confirm a paper signature before it counts.
 - The demo signs users out after 17 minutes of inactivity, with a warning at 15.

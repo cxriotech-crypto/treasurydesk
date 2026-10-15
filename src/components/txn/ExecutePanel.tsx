@@ -1,11 +1,11 @@
 'use client';
 
 import { useState } from 'react';
-import { CheckCircle2, RotateCw, Send } from 'lucide-react';
+import { CheckCircle2, CornerUpLeft, KeyRound, Send } from 'lucide-react';
 import { nowIso } from '@/lib/dates';
 import { formatDateTime } from '@/lib/format';
 import { operationsService, transactionsService } from '@/services';
-import { useData } from '@/services/useData';
+import { useCurrentUser, useData } from '@/services/useData';
 import {
   Badge,
   Button,
@@ -14,6 +14,7 @@ import {
   InlineAlert,
   Input,
   SkeletonRows,
+  Textarea,
   toast,
 } from '@/components/ui';
 
@@ -21,7 +22,17 @@ function demoRef(): string {
   return `EZB-${nowIso().slice(0, 10).replace(/-/g, '')}-${String(Date.now() % 100000).padStart(5, '0')}`;
 }
 
-/** Operations: plain-language posting instructions, Eazybankz ref, GAPS submission with retry. */
+const STATUS_BADGE = {
+  PREPARED: { tone: 'warning', label: 'Awaiting approval' },
+  SUCCESS: { tone: 'success', label: 'Executed' },
+  FAILED: { tone: 'danger', label: 'Failed' },
+  RETURNED: { tone: 'neutral', label: 'Sent back' },
+} as const;
+
+/**
+ * Operations, in two steps by two people: one officer keys the Eazybankz posting reference, a
+ * different officer approves it — which executes it, sending it to GAPS where money leaves the bank.
+ */
 export function ExecuteDrawer({
   txnId,
   open,
@@ -31,6 +42,7 @@ export function ExecuteDrawer({
   open: boolean;
   onClose: () => void;
 }) {
+  const me = useCurrentUser();
   const detail = useData(
     () => (txnId ? transactionsService.get(txnId) : Promise.resolve(null)),
     [txnId]
@@ -40,13 +52,21 @@ export function ExecuteDrawer({
     [txnId]
   );
   const [ref, setRef] = useState('');
+  const [returning, setReturning] = useState(false);
+  const [reason, setReason] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const d = detail.data;
   const gaps = d?.gapsRequired ?? false;
-  const done = d && !['PENDING_OPERATIONS', 'EXEC_FAILED'].includes(d.txn.status);
+  const status = d?.txn.status;
+  const keying = status === 'PENDING_OPERATIONS' || status === 'EXEC_FAILED';
+  const approving = status === 'PENDING_OPS_APPROVAL';
+  const done = !!d && !keying && !approving;
+  const prepared = d?.executions.find((e) => e.status === 'PREPARED');
+  const lastFail = d?.executions.filter((e) => e.status === 'FAILED').pop();
+  const lastReturn = d?.executions.filter((e) => e.status === 'RETURNED').pop();
 
-  const run = async () => {
+  const key = async () => {
     if (!txnId || !d) return;
     if (!ref.trim()) {
       setError('Enter the Eazybankz posting reference');
@@ -55,17 +75,9 @@ export function ExecuteDrawer({
     setBusy(true);
     setError(null);
     try {
-      const r = gaps
-        ? await operationsService.sendToGaps(txnId, ref, d.txn.version)
-        : await operationsService.executeInternal(txnId, ref, d.txn.version);
-      if (r.ok) {
-        toast.success(
-          `${d.txn.txnRef} executed`,
-          r.execution.gapsRef ? `GAPS reference ${r.execution.gapsRef}` : 'Posted in Eazybankz'
-        );
-      } else {
-        toast.error('GAPS submission failed', r.execution.failureReason ?? undefined);
-      }
+      await operationsService.prepare(txnId, ref, d.txn.version);
+      toast.success('Posting keyed', 'A second Operations officer must now approve it.');
+      setRef('');
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -73,40 +85,115 @@ export function ExecuteDrawer({
     }
   };
 
-  const lastFail = d?.executions.filter((e) => e.status === 'FAILED').pop();
+  const approve = async () => {
+    if (!txnId || !d) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await operationsService.approve(txnId, d.txn.version);
+      if (r.ok)
+        toast.success(
+          `${d.txn.txnRef} executed`,
+          r.execution.gapsRef ? `GAPS reference ${r.execution.gapsRef}` : 'Posted in Eazybankz'
+        );
+      else toast.error('GAPS submission failed', r.execution.failureReason ?? undefined);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const sendBack = async () => {
+    if (!txnId || !d) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await operationsService.returnPosting(txnId, reason, d.txn.version);
+      toast.success('Posting sent back', 'The officer who keyed it has been told why.');
+      setReturning(false);
+      setReason('');
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const blocker = approving ? d?.actions.opsApprove : keying ? d?.actions.execute : null;
 
   return (
     <Drawer
       open={open}
       onClose={() => !busy && onClose()}
       dismissible={!busy}
-      title={d ? `Execute ${d.txn.txnRef}` : 'Execute'}
-      description={d ? `${d.customer.customerName}` : undefined}
+      title={
+        d
+          ? approving
+            ? `Approve posting · ${d.txn.txnRef}`
+            : `Key posting · ${d.txn.txnRef}`
+          : 'Operations'
+      }
+      description={d ? d.customer.customerName : undefined}
       footer={
         done ? (
           <Button variant="primary" onClick={onClose}>
             Close
           </Button>
+        ) : returning ? (
+          <>
+            <Button onClick={() => setReturning(false)} disabled={busy}>
+              Back
+            </Button>
+            <Button
+              variant="danger"
+              icon={CornerUpLeft}
+              loading={busy}
+              disabledReason={reason.trim() ? null : 'Say what needs correcting'}
+              onClick={() => void sendBack()}
+            >
+              Send back
+            </Button>
+          </>
         ) : (
           <>
             <Button onClick={onClose} disabled={busy}>
               Cancel
             </Button>
-            <Button
-              variant="primary"
-              icon={d?.txn.status === 'EXEC_FAILED' ? RotateCw : gaps ? Send : CheckCircle2}
-              loading={busy}
-              onClick={run}
-              disabled={!d}
-            >
-              {busy && gaps
-                ? 'Sending to GAPS…'
-                : d?.txn.status === 'EXEC_FAILED'
-                  ? 'Retry GAPS submission'
-                  : gaps
-                    ? 'Send to GAPS'
-                    : 'Mark executed'}
-            </Button>
+            {approving ? (
+              <>
+                <Button
+                  icon={CornerUpLeft}
+                  disabledReason={blocker ?? null}
+                  onClick={() => setReturning(true)}
+                >
+                  Send back
+                </Button>
+                <Button
+                  variant="primary"
+                  icon={gaps ? Send : CheckCircle2}
+                  loading={busy}
+                  disabledReason={blocker ?? null}
+                  onClick={() => void approve()}
+                >
+                  {busy && gaps
+                    ? 'Sending to GAPS…'
+                    : gaps
+                      ? 'Approve and send to GAPS'
+                      : 'Approve and post'}
+                </Button>
+              </>
+            ) : (
+              <Button
+                variant="primary"
+                icon={KeyRound}
+                loading={busy}
+                disabledReason={blocker ?? null}
+                onClick={() => void key()}
+              >
+                Key posting
+              </Button>
+            )}
           </>
         )
       }
@@ -120,10 +207,23 @@ export function ExecuteDrawer({
               {d.txn.txnRef} was executed. The Treasury Officer has been asked to confirm
               completion.
             </InlineAlert>
-          ) : lastFail && d.txn.status === 'EXEC_FAILED' ? (
+          ) : approving && prepared ? (
+            <InlineAlert tone="info" title="Keyed, awaiting a second officer">
+              {prepared.executedByName} keyed{' '}
+              <span className="num font-medium">{prepared.cbsPostingRef}</span> at{' '}
+              {formatDateTime(prepared.executedAt)}.{' '}
+              {prepared.executedBy === me?.id
+                ? 'Another Operations officer must approve it.'
+                : 'Check it against the instructions below before approving.'}
+            </InlineAlert>
+          ) : lastFail && status === 'EXEC_FAILED' ? (
             <InlineAlert tone="danger" title="Last GAPS submission failed">
-              {lastFail.failureReason} · {formatDateTime(lastFail.executedAt)}. Correct the issue
-              and retry.
+              {lastFail.failureReason} · {formatDateTime(lastFail.executedAt)}. Key it again for a
+              second officer to approve.
+            </InlineAlert>
+          ) : lastReturn && keying ? (
+            <InlineAlert tone="warning" title="Sent back by the approving officer">
+              {lastReturn.approvedByName}: {lastReturn.failureReason}
             </InlineAlert>
           ) : null}
           <div>
@@ -138,7 +238,7 @@ export function ExecuteDrawer({
               </ol>
             )}
           </div>
-          {!done ? (
+          {keying ? (
             <Field
               label="Eazybankz posting reference"
               required
@@ -161,7 +261,15 @@ export function ExecuteDrawer({
               />
             </Field>
           ) : null}
-          {error && ref.trim() ? <InlineAlert tone="danger">{error}</InlineAlert> : null}
+          {returning ? (
+            <Field label="What needs correcting" required>
+              <Textarea rows={2} value={reason} onChange={(e) => setReason(e.target.value)} />
+            </Field>
+          ) : null}
+          {error && (ref.trim() || !keying) ? (
+            <InlineAlert tone="danger">{error}</InlineAlert>
+          ) : null}
+          {blocker && !done ? <InlineAlert tone="info">{blocker}.</InlineAlert> : null}
           <div className="flex items-center gap-2 text-[13px] text-muted">
             <Badge tone={gaps ? 'info' : 'neutral'}>
               {gaps ? 'External payment via GAPS' : 'Internal only – no GAPS'}
@@ -177,17 +285,16 @@ export function ExecuteDrawer({
                     className="flex flex-wrap items-center justify-between gap-2 px-3 py-2"
                   >
                     <span>
-                      #{e.attemptNo} · {e.executedByName} ·{' '}
-                      <span className="num">{formatDateTime(e.executedAt)}</span>
+                      #{e.attemptNo} · keyed by {e.executedByName}
+                      {e.approvedByName ? ` · approved by ${e.approvedByName}` : ''}
                       <span className="block text-xs text-muted">
+                        <span className="num">{formatDateTime(e.executedAt)}</span> ·{' '}
                         {e.cbsPostingRef}
                         {e.gapsRef ? ` · ${e.gapsRef}` : ''}
                         {e.failureReason ? ` · ${e.failureReason}` : ''}
                       </span>
                     </span>
-                    <Badge tone={e.status === 'SUCCESS' ? 'success' : 'danger'}>
-                      {e.status === 'SUCCESS' ? 'Success' : 'Failed'}
-                    </Badge>
+                    <Badge tone={STATUS_BADGE[e.status].tone}>{STATUS_BADGE[e.status].label}</Badge>
                   </li>
                 ))}
               </ul>

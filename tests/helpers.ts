@@ -8,6 +8,7 @@ export const DEMO = {
   AUD: 'olumide.adeyemi@fmtfinance.com',
   MD: 'folake.adebayo@fmtfinance.com',
   OPS: 'emeka.nwosu@fmtfinance.com',
+  OPS2: 'funmilayo.adeleke@fmtfinance.com',
   ADM: 'kelechi.obi@fmtfinance.com',
 } as const;
 
@@ -19,6 +20,7 @@ export const NAMES: Record<keyof typeof DEMO, string> = {
   AUD: 'Olumide Adeyemi',
   MD: 'Mrs. Folake Adebayo',
   OPS: 'Emeka Nwosu',
+  OPS2: 'Funmilayo Adeleke',
   ADM: 'Kelechi Obi',
 };
 
@@ -80,6 +82,50 @@ export async function switchToName(page: Page, fullName: string) {
   await expect(
     page.getByRole('button', { name: new RegExp(`User menu for ${fullName}`) })
   ).toBeVisible();
+}
+
+/** Sign the open signature dialog as a named person (e.g. a customer's own Account Officer). */
+export async function signAs(page: Page, fullName: string, action = 'Approve & sign') {
+  const dialog = page.getByRole('dialog');
+  await dialog.getByLabel('Full name').fill(fullName);
+  await dialog.getByLabel('PIN').fill('1234');
+  await dialog.getByRole('button', { name: action }).click();
+  await expect(dialog).toBeHidden({ timeout: 20_000 });
+}
+
+/** The customer's Account Officer, as shown on the transaction summary. */
+export async function accountOfficerOf(page: Page): Promise<string> {
+  return (await page
+    .locator('dt', { hasText: /^Account Officer$/ })
+    .locator('+ dd')
+    .first()
+    .textContent())!.trim();
+}
+
+/** As the customer's Account Officer: log a confirmed call, then approve. */
+export async function accountOfficerApproves(page: Page) {
+  const ao = await accountOfficerOf(page);
+  await switchToName(page, ao);
+  await expect(page.getByRole('button', { name: 'Approve & sign' }).first()).toBeDisabled();
+  await page.getByRole('button', { name: 'Log call-back' }).first().click();
+  const call = page.getByRole('dialog');
+  for (const item of [
+    'Amount confirmed',
+    'Instruction confirmed',
+    'Beneficiary confirmed',
+    'Purpose confirmed',
+  ]) {
+    await call
+      .getByRole('radiogroup', { name: item })
+      .getByRole('radio', { name: 'Confirmed', exact: true })
+      .click();
+  }
+  await call.getByRole('radio', { name: 'Confirmed', exact: true }).last().check();
+  await call.getByRole('button', { name: 'Save call-back' }).click();
+  await expect(page.getByText('Call-back confirmed').first()).toBeVisible({ timeout: 20_000 });
+  await page.getByRole('button', { name: 'Approve & sign' }).first().click();
+  await signAs(page, ao);
+  return ao;
 }
 
 /** Fill and submit the signature dialog, optionally leaving a note for the next approver. */

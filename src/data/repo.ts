@@ -44,6 +44,9 @@ const ID_PREFIX: Record<TableName, string> = {
   notifications: 'NTF',
   audit: 'AUD',
   imports: 'IMP',
+  attachments: 'ATT',
+  recalls: 'RCL',
+  batches: 'BAT',
   holidays: 'HOL',
   integrations: 'INT',
 };

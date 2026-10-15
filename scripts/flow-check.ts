@@ -131,15 +131,23 @@ function inputFor(s: ScenarioCode, subj: ReturnType<typeof subjectFor>): TxnInpu
 
 interface RunOpts {
   external?: boolean;
-  /** Never call the customer: the call-back is recorded but does not block. */
-  skipCallback?: boolean;
   callbackFailFirst?: boolean;
   returnAtMis?: boolean;
   gapsFailFirst?: boolean;
 }
 
-/** Drive one scenario all the way to COMPLETED. Returns the final transaction. */
-async function runScenario(s: ScenarioCode, o: RunOpts = {}): Promise<TreasuryTxn> {
+/** A new maturity on a weekend or holiday blocks signing: accept the suggestion, as a user would. */
+async function acceptMaturityPrompt(txnId: string) {
+  const txn = db().txns.find((x) => x.id === txnId)!;
+  const prev = await S.transactionsService.preview(txnId, txn.input);
+  if (!prev.maturityPrompt) return;
+  await S.transactionsService.saveDraft(txnId, {
+    input: { ...txn.input, [prev.maturityPrompt.field]: prev.maturityPrompt.suggestedTenorDays },
+  });
+}
+
+/** Take a scenario from a new draft to ready-to-sign (instruction, signature, Eazybankz). */
+async function prepareScenario(s: ScenarioCode, o: RunOpts = {}) {
   const to = await as('TO');
   const subj = subjectFor(s);
   let t = await S.transactionsService.create({
@@ -161,8 +169,15 @@ async function runScenario(s: ScenarioCode, o: RunOpts = {}): Promise<TreasuryTx
     receivedTime: isoTimePart(now),
     amount: t.headlineAmt !== '0.00' ? t.headlineAmt : '1000000.00',
     purpose: 'Flow check',
-    documentName: 'letter.pdf',
-    documentData: null,
+    documents: [
+      { fileName: 'letter.pdf', mimeType: 'application/pdf', sizeBytes: 120_000, dataUrl: null },
+      {
+        fileName: 'letter-page-2.pdf',
+        mimeType: 'application/pdf',
+        sizeBytes: 90_000,
+        dataUrl: null,
+      },
+    ],
     payDestination: external ? 'EXTERNAL' : 'INTERNAL',
     benefName: external ? cust.customerName : (internalBenef?.accountName ?? null),
     bankCode: external ? '058' : null,
@@ -175,34 +190,56 @@ async function runScenario(s: ScenarioCode, o: RunOpts = {}): Promise<TreasuryTx
     ownershipOk: true,
     completeOk: true,
   });
-  // Call-back by the customer's Account Officer. It is recorded but never blocks, so a run can
-  // skip it entirely and still reach COMPLETED with control C03 left outstanding.
-  if (!o.skipCallback) await as(cust.accountOfficerId);
-  const cb = {
-    phoneCalled: cust.regPhone,
-    callDate: isoDatePart(now),
-    callTime: isoTimePart(now),
-    officerId: cust.accountOfficerId,
-  };
-  if (o.callbackFailFirst && !o.skipCallback) {
-    await S.callbacksService.log(t.id, {
-      ...cb,
-      amountOk: false,
-      instrOk: false,
-      benefOk: false,
-      purposeOk: false,
-      outcome: 'UNREACHABLE',
-      notes: 'No answer',
-    });
-    // The call-back is recorded but does not block: an unconfirmed one still lets the maker on.
-    await as('TO');
-    const ctrl = db().controls.find((c) => c.txnId === t.id && c.controlCode === 'C03');
-    if (ctrl?.state === 'PENDING')
-      pass(`${s}: call-back stays outstanding after a failed call`, 'C03 PENDING');
-    else fail(`${s}: call-back stays outstanding after a failed call`, String(ctrl?.state));
-    await as(cust.accountOfficerId);
-  }
-  if (!o.skipCallback)
+  await S.transactionsService.refreshFromCbs(t.id);
+  await S.transactionsService.confirmCbs(t.id, {
+    cbsSyncedAt: nowIso(),
+    fundsReceived: true,
+    sourceConfirmed: true,
+  });
+  await acceptMaturityPrompt(t.id);
+  const prev = await S.transactionsService.preview(
+    t.id,
+    db().txns.find((x) => x.id === t.id)!.input
+  );
+  if (Object.keys(prev.errors).length)
+    throw new Error(`${s} voucher errors: ${JSON.stringify(prev.errors)}`);
+  t = db().txns.find((x) => x.id === t.id)!;
+  return { t, to, cust };
+}
+
+/** Drive one scenario all the way to COMPLETED. Returns the final transaction. */
+async function runScenario(s: ScenarioCode, o: RunOpts = {}): Promise<TreasuryTxn> {
+  const prepared = await prepareScenario(s, o);
+  const { to, cust } = prepared;
+  let t = prepared.t;
+  t = await S.transactionsService.signAndSubmit(t.id, { signatureName: to.fullName, pin: '1234' });
+  if (t.status !== 'PENDING_ACCOUNT_OFFICER')
+    throw new Error(`${s}: expected to go to the Account Officer, got ${t.status}`);
+
+  // The customer's Account Officer calls, then checks: approve, return or reject.
+  const accountOfficerCheck = async () => {
+    const ao = await as(cust.accountOfficerId);
+    const cb = {
+      phoneCalled: cust.regPhone,
+      callDate: isoDatePart(nowIso()),
+      callTime: isoTimePart(nowIso()),
+      officerId: ao.id,
+    };
+    if (o.callbackFailFirst && t.cycleNo === 1) {
+      await S.callbacksService.log(t.id, {
+        ...cb,
+        amountOk: false,
+        instrOk: false,
+        benefOk: false,
+        purposeOk: false,
+        outcome: 'UNREACHABLE',
+        notes: 'No answer',
+      });
+      await expectBlocked(
+        `${s}: the Account Officer cannot approve without a confirmed call`,
+        S.approvalsService.approve(t.id, { signatureName: ao.fullName, pin: '1234' })
+      );
+    }
     await S.callbacksService.log(t.id, {
       ...cb,
       amountOk: true,
@@ -212,40 +249,49 @@ async function runScenario(s: ScenarioCode, o: RunOpts = {}): Promise<TreasuryTx
       outcome: 'CONFIRMED',
       notes: '',
     });
-  await as('TO');
-  await S.transactionsService.refreshFromCbs(t.id);
-  await S.transactionsService.confirmCbs(t.id, {
-    cbsSyncedAt: nowIso(),
-    fundsReceived: true,
-    sourceConfirmed: true,
-  });
-  const prev = await S.transactionsService.preview(t.id, t.input);
-  if (Object.keys(prev.errors).length)
-    throw new Error(`${s} voucher errors: ${JSON.stringify(prev.errors)}`);
-  t = await S.transactionsService.signAndSubmit(t.id, { signatureName: to.fullName, pin: '1234' });
-
-  for (const role of ['HT', 'MIS', 'AUD', 'MD'] as RoleCode[]) {
+    t = await S.approvalsService.approve(t.id, { signatureName: ao.fullName, pin: '1234' });
+  };
+  const signAt = async (role: RoleCode) => {
     const u = await as(role);
+    if (role === 'AUD') {
+      await expectBlocked(
+        `${s}: Audit cannot sign before re-verifying the signature`,
+        S.approvalsService.approve(t.id, { signatureName: u.fullName, pin: '1234' })
+      );
+      await S.transactionsService.auditVerify(t.id, {
+        sigOk: true,
+        mandateOk: true,
+        ownershipOk: true,
+        completeOk: true,
+      });
+    }
+    t = await S.approvalsService.approve(t.id, { signatureName: u.fullName, pin: '1234' });
+  };
+
+  await accountOfficerCheck();
+  for (const role of ['HT', 'MIS', 'AUD', 'MD'] as RoleCode[]) {
     if (o.returnAtMis && role === 'MIS' && t.cycleNo === 1) {
+      await as('MIS');
       t = await S.approvalsService.returnToMaker(t.id, 'Please correct the remarks');
       const m = await as('TO');
       t = await S.transactionsService.signAndSubmit(t.id, {
         signatureName: m.fullName,
         pin: '1234',
       });
-      for (const r2 of ['HT', 'MIS'] as RoleCode[]) {
-        const u2 = await as(r2);
-        t = await S.approvalsService.approve(t.id, { signatureName: u2.fullName, pin: '1234' });
-      }
-      continue;
+      // A resubmission starts again from the Account Officer, not from MIS.
+      if (t.status !== 'PENDING_ACCOUNT_OFFICER')
+        fail(`${s}: resubmission restarts from the Account Officer`, t.status);
+      else pass(`${s}: resubmission restarts from the Account Officer`, `cycle ${t.cycleNo}`);
+      await accountOfficerCheck();
+      await signAt('HT');
     }
-    t = await S.approvalsService.approve(t.id, { signatureName: u.fullName, pin: '1234' });
+    await signAt(role);
   }
   if (t.status !== 'PENDING_OPERATIONS')
     throw new Error(`${s}: expected PENDING_OPERATIONS, got ${t.status}`);
 
-  await as('OPS');
-  const needsGaps = (await S.transactionsService.get(t.id)).gapsRequired;
+  // Operations: one officer keys the posting, a different one approves it.
+  const [ops1, ops2] = db().users.filter((u) => u.roleCode === 'OPS' && u.status === 'ACTIVE');
   const setRate = async (rate: number) => {
     await as('ADM');
     const st = await S.settingsService.get();
@@ -254,29 +300,36 @@ async function runScenario(s: ScenarioCode, o: RunOpts = {}): Promise<TreasuryTx
       'Flow check',
       st.version
     );
-    await as('OPS');
   };
-  if (needsGaps) {
-    if (o.gapsFailFirst) {
-      await setRate(100);
-      const r = await S.operationsService.sendToGaps(t.id, 'EZB-FLOW-1');
-      if (r.ok || r.txn.status !== 'EXEC_FAILED')
-        throw new Error(`${s}: GAPS failure not recorded`);
-      await setRate(0);
-    }
-    const r = await S.operationsService.sendToGaps(t.id, 'EZB-FLOW-2');
-    if (!r.ok) throw new Error(`${s}: GAPS did not succeed`);
+  const key = async (ref: string) => {
+    await as(ops1.id);
+    t = await S.operationsService.prepare(t.id, ref);
+  };
+  const approveAsSecond = async () => {
+    await as(ops2.id);
+    const r = await S.operationsService.approve(t.id);
     t = r.txn;
-  } else {
-    t = (await S.operationsService.executeInternal(t.id, 'EZB-FLOW-3')).txn;
+    return r;
+  };
+  if (o.gapsFailFirst) {
+    await setRate(100);
+    await key('EZB-FLOW-1');
+    await as(ops1.id);
+    await expectBlocked(
+      `${s}: the officer who keyed a posting cannot approve it`,
+      S.operationsService.approve(t.id)
+    );
+    const r = await approveAsSecond();
+    if (r.ok || r.txn.status !== 'EXEC_FAILED') throw new Error(`${s}: GAPS failure not recorded`);
+    await setRate(0);
   }
+  await key('EZB-FLOW-2');
+  const r = await approveAsSecond();
+  if (!r.ok) throw new Error(`${s}: execution did not succeed`);
   await as('TO');
   t = await S.transactionsService.confirmCompletion(t.id);
   const d = await S.transactionsService.get(t.id);
-  // A skipped call-back leaves C03 outstanding on purpose; every other control must pass.
-  const notPassed = d.controls
-    .filter((c) => c.state !== 'PASSED' && !(o.skipCallback && c.controlCode === 'C03'))
-    .map((c) => c.controlCode);
+  const notPassed = d.controls.filter((c) => c.state !== 'PASSED').map((c) => c.controlCode);
   if (notPassed.length) throw new Error(`${s}: controls not passed: ${notPassed.join(',')}`);
   if (d.vouchers.map((v) => v.voucherType).join('+') !== SCENARIO_META[s].vouchers.join('+'))
     throw new Error(`${s}: wrong vouchers`);
@@ -362,8 +415,6 @@ async function main() {
       receivedTime: isoTimePart(now),
       amount: '1000.00',
       purpose: 'x',
-      documentName: null,
-      documentData: null,
       payDestination: 'INTERNAL',
       benefName: 'X',
       bankCode: null,
@@ -418,15 +469,187 @@ async function main() {
     fail('Approval exceptions', (e as Error).message);
   }
 
-  // 2b. The call-back never blocks, and a switched-off deduction must be explained.
+  // 2b. Batching: several submitted with one signature; each level decides per item.
   try {
-    const t = await runScenario('TRANSFER_SS_PA', { skipCallback: true });
-    const c03 = db().controls.find((x) => x.txnId === t.id && x.controlCode === 'C03');
-    t.status === 'COMPLETED' && c03?.state === 'PENDING'
-      ? pass('Call-back does not block', `${t.txnRef} COMPLETED with C03 outstanding`)
-      : fail('Call-back does not block', `${t.status} · C03 ${c03?.state}`);
+    const ready = [];
+    for (const sc of ['TRANSFER_SS_PA', 'THIRD_PARTY_INT', 'TRANSFER_PA_CALL'] as ScenarioCode[])
+      ready.push(await prepareScenario(sc));
+    const to = await as('TO');
+    const res = await S.batchesService.submit(
+      ready.map((x) => x.t.id),
+      { signatureName: to.fullName, pin: '1234' },
+      'Flow check batch'
+    );
+    res.batch && res.submitted.length === 3
+      ? pass('A batch is submitted with one signature', `${res.batch.batchRef}: 3 items`)
+      : fail('A batch is submitted with one signature', JSON.stringify(res.failed));
+    // Each customer's Account Officer calls and decides on their own items: two go on, one back.
+    for (const [i, x] of ready.entries()) {
+      const ao = await as(x.cust.accountOfficerId);
+      await S.callbacksService.log(x.t.id, {
+        phoneCalled: x.cust.regPhone,
+        callDate: isoDatePart(nowIso()),
+        callTime: isoTimePart(nowIso()),
+        officerId: ao.id,
+        amountOk: true,
+        instrOk: true,
+        benefOk: true,
+        purposeOk: true,
+        outcome: 'CONFIRMED',
+        notes: '',
+      });
+      await S.batchesService.decide(
+        res.batch!.id,
+        [
+          i === 2
+            ? { txnId: x.t.id, action: 'RETURN', comment: 'Customer wants a different tenor' }
+            : { txnId: x.t.id, action: 'APPROVE' },
+        ],
+        { signatureName: ao.fullName, pin: '1234' }
+      );
+    }
+    // Head of Treasury decides on what reached them, together.
+    const ht = await as('HT');
+    const at = await S.batchesService.get(res.batch!.id);
+    const mine = at.items.filter((x) => x.canDecide);
+    const decided = await S.batchesService.decide(
+      res.batch!.id,
+      mine.map((x, i) =>
+        i === 0
+          ? { txnId: x.id, action: 'APPROVE' as const }
+          : {
+              txnId: x.id,
+              action: 'REJECT' as const,
+              comment: 'Duplicate of an earlier instruction',
+            }
+      ),
+      { signatureName: ht.fullName, pin: '1234' }
+    );
+    const final = await S.batchesService.get(res.batch!.id);
+    const status = (id: string) => final.items.find((x) => x.id === id)?.status;
+    status(ready[0].t.id) === 'PENDING_MIS' &&
+    status(ready[1].t.id) === 'REJECTED' &&
+    status(ready[2].t.id) === 'RETURNED' &&
+    decided.done.length === 2
+      ? pass(
+          'Approved items move on, returned and rejected ones go back',
+          'MIS · rejected · returned to maker'
+        )
+      : fail(
+          'Approved items move on, returned and rejected ones go back',
+          ready.map((x) => status(x.t.id)).join(', ')
+        );
   } catch (e) {
-    fail('Call-back does not block', (e as Error).message);
+    fail('Batching', (e as Error).message);
+  }
+
+  // 2c. Recall: the maker recalls; someone else asks and the maker sends it back to them.
+  try {
+    const own = db().txns.find((t) => t.status === 'PENDING_MIS' && t.makerId === userOf('TO').id)!;
+    await as('TO');
+    const back = await S.transactionsService.recall(own.id, 'Customer changed the payment date');
+    back.status === 'RETURNED'
+      ? pass('The maker can recall a submitted transaction', `${back.txnRef} back with the maker`)
+      : fail('The maker can recall a submitted transaction', back.status);
+
+    const atMd = db().txns.find((t) => t.status === 'PENDING_MD')!;
+    await as('AUD');
+    const req = await S.transactionsService.requestRecall(
+      atMd.id,
+      'I need to re-check the mandate before the MD signs'
+    );
+    await as('TO');
+    await S.transactionsService.decideRecall(req.id, 'TO_REQUESTER', '');
+    const after = db().txns.find((t) => t.id === atMd.id)!;
+    const audSig = db().approvals.find(
+      (a) =>
+        a.txnId === atMd.id &&
+        a.cycleNo === after.cycleNo &&
+        a.roleCode === 'AUD' &&
+        a.action === 'APPROVE'
+    );
+    after.status === 'PENDING_AUDIT' && audSig?.superseded
+      ? pass(
+          'A recall request can send it back to the person who asked',
+          'back with Internal Audit'
+        )
+      : fail('A recall request can send it back to the person who asked', after.status);
+  } catch (e) {
+    fail('Recall', (e as Error).message);
+  }
+
+  // 2d. Paper signature: the maker uploads the scan for an approver who cannot sign in the app.
+  try {
+    const atHt = db().txns.find(
+      (t) => t.status === 'PENDING_HEAD_TREASURY' && t.makerId === userOf('TO').id
+    )!;
+    await as('TO');
+    await expectBlocked(
+      'A paper signature needs the signed scan',
+      S.transactionsService.recordPaperApproval(atHt.id, {
+        signedBy: userOf('HT').id,
+        reason: 'Travelling',
+        documents: [],
+      })
+    );
+    const t = await S.transactionsService.recordPaperApproval(atHt.id, {
+      signedBy: userOf('HT').id,
+      reason: 'Travelling; signed the printed voucher',
+      documents: [
+        { fileName: 'signed.pdf', mimeType: 'application/pdf', sizeBytes: 200_000, dataUrl: null },
+        {
+          fileName: 'signed-p2.pdf',
+          mimeType: 'application/pdf',
+          sizeBytes: 150_000,
+          dataUrl: null,
+        },
+      ],
+    });
+    const ap = db().approvals.find(
+      (a) => a.txnId === atHt.id && a.roleCode === 'HT' && a.channel === 'PAPER'
+    );
+    t.status === 'PENDING_MIS' &&
+    ap?.userId === userOf('HT').id &&
+    ap.recordedBy === userOf('TO').id
+      ? pass('A paper signature completes the step in the approver’s name', 'moved to MIS')
+      : fail('A paper signature completes the step', t.status);
+  } catch (e) {
+    fail('Paper signature', (e as Error).message);
+  }
+
+  // 2e. Several supporting documents at once; a weekend maturity is caught before signing.
+  try {
+    const any = db().txns.find((t) => t.status === 'PENDING_MIS')!;
+    await as('MIS');
+    const added = await S.transactionsService.addDocuments(any.id, [
+      { fileName: 'a.pdf', mimeType: 'application/pdf', sizeBytes: 10_000, dataUrl: null },
+      { fileName: 'b.png', mimeType: 'image/png', sizeBytes: 10_000, dataUrl: null },
+      { fileName: 'c.jpg', mimeType: 'image/jpeg', sizeBytes: 10_000, dataUrl: null },
+    ]);
+    added.length === 3
+      ? pass('Several supporting documents can be added at once', '3 attached')
+      : fail('Several supporting documents', String(added.length));
+
+    const { t } = await prepareScenario('INFLOW');
+    // Find a tenor that lands on a Saturday, and check the voucher refuses it.
+    const eff = t.input.valueDate!;
+    let tenor = 90;
+    while (
+      new Date(`${eff}T12:00:00Z`).getTime() + tenor * 864e5 &&
+      new Date(new Date(`${eff}T12:00:00Z`).getTime() + tenor * 864e5).getUTCDay() !== 6
+    )
+      tenor++;
+    const prev = await S.transactionsService.preview(t.id, { ...t.input, newTenorDays: tenor });
+    prev.maturityPrompt &&
+    prev.errors.newTenorDays &&
+    prev.maturityPrompt.suggestedTenorDays === tenor + 2
+      ? pass(
+          'A weekend maturity is caught and the next business day suggested',
+          prev.errors.newTenorDays
+        )
+      : fail('A weekend maturity is caught', JSON.stringify(prev.maturityPrompt));
+  } catch (e) {
+    fail('Documents and weekend maturity', (e as Error).message);
   }
 
   try {

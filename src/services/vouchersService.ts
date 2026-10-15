@@ -1,11 +1,12 @@
 import type { Customer, Execution, Instruction, TreasuryTxn, Voucher } from '@/domain/types';
 import { APPROVAL_LEVELS, VOUCHER_TYPE_META } from '@/domain/codes';
 import { COMPANY_NAME } from '@/domain/rules';
+import { accruedInterest } from '@/lib/calc';
 import { todayLagos } from '@/lib/dates';
 import { amountInWords } from '@/lib/words';
 import type { Db } from '@/data/db';
 import { getDb } from '@/data/store';
-import { AppError, getById } from '@/data/repo';
+import { AppError, findById, getById } from '@/data/repo';
 import { USE_MOCK, http, run } from './core';
 import { canSeeCustomer } from './scope';
 import { userName } from './transactionsService';
@@ -30,8 +31,24 @@ export interface PrintableVoucher {
   amountInWords: string;
   signatures: SignatureBox[];
   execution:
-    | (Pick<Execution, 'cbsPostingRef' | 'gapsRef' | 'executedAt'> & { executedByName: string })
+    | (Pick<Execution, 'cbsPostingRef' | 'gapsRef' | 'executedAt'> & {
+        executedByName: string;
+        approvedByName: string | null;
+      })
     | null;
+  /** The investment this transaction comes from — the one leading to the new booking. */
+  previousInvestment: {
+    investmentRef: string;
+    productCode: string;
+    principalAmt: string;
+    intRate: string;
+    effectiveDate: string;
+    tenorDays: number;
+    maturityDate: string;
+    intPaidToDate: string;
+    accruedInterest: string;
+    accruedTo: string;
+  } | null;
   isDraft: boolean;
   siblingCount: number;
 }
@@ -62,8 +79,15 @@ function assemble(
   const c = getById(db, 'customers', t.customerId, 'customer');
   const ins = db.instructions.find((i) => i.txnId === t.id) ?? null;
   const approvals = db.approvals.filter(
-    (a) => a.txnId === t.id && a.cycleNo === t.cycleNo && a.action === 'APPROVE'
+    (a) => a.txnId === t.id && a.cycleNo === t.cycleNo && a.action === 'APPROVE' && !a.superseded
   );
+  // The investment being rolled, liquidated, paid or corrected: shown so the new booking can be
+  // read against what it came from.
+  const prevId =
+    t.investmentId ??
+    (t.reversalOfTxnId ? findById(db, 'txns', t.reversalOfTxnId)?.resultInvestmentId : null);
+  const prev = findById(db, 'investments', prevId);
+  const accruedTo = v.transferDate || todayLagos();
   const ex = db.executions.filter((e) => e.txnId === t.id && e.status === 'SUCCESS').pop();
   const amt = headline(v);
   return {
@@ -88,7 +112,9 @@ function assemble(
       return {
         levelNo: l.levelNo,
         roleLabel: l.label,
-        signerName: a ? userName(db, a.userId) : null,
+        signerName: a
+          ? `${userName(db, a.userId)}${a.channel === 'PAPER' ? ' (signed on paper)' : ''}`
+          : null,
         signedAt: a?.actedAt ?? null,
       };
     }),
@@ -99,8 +125,23 @@ function assemble(
             gapsRef: ex.gapsRef,
             executedAt: ex.executedAt,
             executedByName: userName(db, ex.executedBy),
+            approvedByName: ex.approvedBy ? userName(db, ex.approvedBy) : null,
           }
         : null,
+    previousInvestment: prev
+      ? {
+          investmentRef: prev.investmentRef,
+          productCode: prev.productCode,
+          principalAmt: prev.principalAmt,
+          intRate: prev.intRate,
+          effectiveDate: prev.effectiveDate,
+          tenorDays: prev.tenorDays,
+          maturityDate: prev.maturityDate,
+          intPaidToDate: prev.intPaidToDate,
+          accruedInterest: accruedInterest(prev, accruedTo, db.settings.values).value,
+          accruedTo,
+        }
+      : null,
     isDraft,
     siblingCount,
   };

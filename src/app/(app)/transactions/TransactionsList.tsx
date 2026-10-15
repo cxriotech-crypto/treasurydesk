@@ -53,9 +53,19 @@ const TABS: { key: string; label: string; statuses: TxnStatus[] | null }[] = [
   {
     key: 'approval',
     label: 'Awaiting approval',
-    statuses: ['PENDING_HEAD_TREASURY', 'PENDING_MIS', 'PENDING_AUDIT', 'PENDING_MD'],
+    statuses: [
+      'PENDING_ACCOUNT_OFFICER',
+      'PENDING_HEAD_TREASURY',
+      'PENDING_MIS',
+      'PENDING_AUDIT',
+      'PENDING_MD',
+    ],
   },
-  { key: 'ops', label: 'Operations', statuses: ['PENDING_OPERATIONS', 'EXEC_FAILED', 'EXECUTED'] },
+  {
+    key: 'ops',
+    label: 'Operations',
+    statuses: ['PENDING_OPERATIONS', 'PENDING_OPS_APPROVAL', 'EXEC_FAILED', 'EXECUTED'],
+  },
   { key: 'completed', label: 'Completed', statuses: ['COMPLETED'] },
   {
     key: 'closed',

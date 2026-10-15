@@ -28,15 +28,14 @@ import { useDisclosure } from '@/components/hooks';
 import { StepSubject } from './StepSubject';
 import { StepInstruction } from './StepInstruction';
 import { StepSignature } from './StepSignature';
-import { StepCallback } from './StepCallback';
 import { StepCbs } from './StepCbs';
 import { StepVoucher } from './StepVoucher';
 
+/** The Treasury Officer prepares everything; the customer call-back follows submission. */
 const STEP_LABELS = [
   'Type & scenario',
   'Instruction',
   'Signature & mandate',
-  'Call-back',
   'Eazybankz',
   'Voucher',
 ];
@@ -45,9 +44,8 @@ const STEP_LABELS = [
 function reachable(d: TxnDetail | null | undefined): number {
   if (!d) return 1;
   const ok = (code: string) => d.controls.find((c) => c.controlCode === code)?.state === 'PASSED';
-  if (d.txn.status === 'RETURNED') return 6;
-  if (ok('C04')) return 6;
-  if (ok('C03')) return 5;
+  if (d.txn.status === 'RETURNED') return 5;
+  if (ok('C04')) return 5;
   if (ok('C02')) return 4;
   if (ok('C01')) return 3;
   return 2;
@@ -186,8 +184,6 @@ export function Wizard() {
           ) : current === 3 ? (
             <StepSignature detail={d} goTo={goTo} />
           ) : current === 4 ? (
-            <StepCallback detail={d} goTo={goTo} />
-          ) : current === 5 ? (
             <StepCbs detail={d} goTo={goTo} />
           ) : (
             <StepVoucher detail={d} goTo={goTo} />

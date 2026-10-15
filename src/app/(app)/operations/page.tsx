@@ -2,7 +2,7 @@
 
 import { Suspense, useState } from 'react';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
-import { PlayCircle, RotateCw } from 'lucide-react';
+import { CheckCircle2, KeyRound, RotateCw } from 'lucide-react';
 import { scenarioLabel } from '@/domain/codes';
 import { operationsService } from '@/services';
 import { useData } from '@/services/useData';
@@ -29,7 +29,9 @@ function OperationsQueue() {
   const sp = useSearchParams();
   const open = sp.get('txn');
   const [search, setSearch] = useState('');
-  const [status, setStatus] = useState<'' | 'PENDING_OPERATIONS' | 'EXEC_FAILED'>('');
+  const [status, setStatus] = useState<
+    '' | 'PENDING_OPERATIONS' | 'PENDING_OPS_APPROVAL' | 'EXEC_FAILED'
+  >('');
   const q = useData(
     () =>
       operationsService.queue({
@@ -39,6 +41,7 @@ function OperationsQueue() {
   );
   const all = useData(() => operationsService.queue(), []);
   const failed = all.data?.items.filter((r) => r.status === 'EXEC_FAILED').length ?? 0;
+  const toApprove = all.data?.items.filter((r) => r.status === 'PENDING_OPS_APPROVAL').length ?? 0;
 
   const setOpen = (id: string | null) =>
     router.replace(id ? `${pathname}?txn=${id}` : pathname, { scroll: false });
@@ -95,16 +98,32 @@ function OperationsQueue() {
     {
       key: 'act',
       header: <span className="sr-only">Action</span>,
-      cell: (r) => (
-        <Button
-          size="sm"
-          variant={r.status === 'EXEC_FAILED' ? 'secondary' : 'primary'}
-          icon={r.status === 'EXEC_FAILED' ? RotateCw : PlayCircle}
-          onClick={() => setOpen(r.id)}
-        >
-          {r.status === 'EXEC_FAILED' ? 'Retry' : 'Execute'}
-        </Button>
-      ),
+      cell: (r) =>
+        r.status === 'PENDING_OPS_APPROVAL' ? (
+          <span className="flex flex-col items-start gap-1">
+            <Button
+              size="sm"
+              variant="primary"
+              icon={CheckCircle2}
+              disabledReason={r.approveBlocker}
+              onClick={() => setOpen(r.id)}
+            >
+              Approve posting
+            </Button>
+            {r.prepared ? (
+              <span className="text-xs text-muted">Keyed by {r.prepared.preparedBy}</span>
+            ) : null}
+          </span>
+        ) : (
+          <Button
+            size="sm"
+            variant={r.status === 'EXEC_FAILED' ? 'secondary' : 'primary'}
+            icon={r.status === 'EXEC_FAILED' ? RotateCw : KeyRound}
+            onClick={() => setOpen(r.id)}
+          >
+            {r.status === 'EXEC_FAILED' ? 'Key again' : 'Key posting'}
+          </Button>
+        ),
       cardLabel: 'Action',
     },
   ];
@@ -113,15 +132,16 @@ function OperationsQueue() {
     <>
       <PageHeader
         title="Operations"
-        description="Fully approved transactions to post in Eazybankz and pay through GAPS."
+        description="Fully approved transactions to post in Eazybankz and pay through GAPS. One officer keys each posting; a different officer approves it before anything is executed."
       />
       <div className="mb-5">
         <KpiGrid>
           <KpiTile
-            label="Ready to execute"
-            value={all.data ? all.data.total - failed : null}
+            label="To key"
+            value={all.data ? all.data.total - failed - toApprove : null}
             loading={all.loading}
           />
+          <KpiTile label="Awaiting a second officer" value={toApprove} loading={all.loading} />
           <KpiTile
             label="GAPS failures"
             value={failed}
@@ -167,6 +187,7 @@ function OperationsQueue() {
                 onChange={(e) => setStatus(e.target.value as typeof status)}
                 options={[
                   { value: 'PENDING_OPERATIONS', label: 'Ready for Operations' },
+                  { value: 'PENDING_OPS_APPROVAL', label: 'Awaiting Operations approval' },
                   { value: 'EXEC_FAILED', label: 'Execution failed' },
                 ]}
               />

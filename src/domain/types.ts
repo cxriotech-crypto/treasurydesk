@@ -12,6 +12,7 @@ import type {
   AccountType,
   AnnivFreq,
   ApprovalAction,
+  ApprovalChannel,
   CallbackOutcome,
   ControlCode,
   ControlState,
@@ -169,6 +170,8 @@ export interface TreasuryTxn extends BaseRecord {
   reversalOfTxnId: string | null;
   reversedByTxnId: string | null;
   resultInvestmentId: string | null;
+  /** The batch it was last submitted in, if any. */
+  batchId: string | null;
   status: TxnStatus;
   wizardStep: number;
   makerId: string;
@@ -193,8 +196,6 @@ export interface Instruction extends BaseRecord {
   receivedTime: string; // HH:mm
   amount: Money;
   purpose: string;
-  documentName: string | null;
-  documentData: string | null;
   payDestination: PayDestination;
   benefName: string | null;
   bankCode: string | null;
@@ -214,6 +215,10 @@ export interface Verification extends BaseRecord {
   sourceConfirmed: boolean;
   verifiedBy: string | null;
   verifiedAt: IsoDateTime | null;
+  /** Internal Audit re-verifies the signature before signing; valid for one approval cycle. */
+  auditVerifiedBy: string | null;
+  auditVerifiedAt: IsoDateTime | null;
+  auditCycleNo: number | null;
 }
 
 export interface CallbackLog extends BaseRecord {
@@ -288,6 +293,12 @@ export interface Approval extends BaseRecord {
   action: ApprovalAction;
   comments: string;
   actedAt: IsoDateTime;
+  /** APP = signed in TreasuryDesk; PAPER = signed on a printed voucher, uploaded by the maker. */
+  channel: ApprovalChannel;
+  /** Who uploaded a paper signature (the maker); null when signed in the app. */
+  recordedBy: string | null;
+  /** True once the transaction was sent back to an earlier level after this signature. */
+  superseded: boolean;
 }
 
 export interface Execution extends BaseRecord {
@@ -297,8 +308,12 @@ export interface Execution extends BaseRecord {
   gapsRef: string | null;
   status: ExecutionStatus;
   failureReason: string | null;
+  /** The Operations officer who keyed the posting. */
   executedBy: string;
   executedAt: IsoDateTime;
+  /** The second Operations officer who approved it; null until approved. */
+  approvedBy: string | null;
+  approvedAt: IsoDateTime | null;
   confirmedBy: string | null;
   confirmedAt: IsoDateTime | null;
 }
@@ -318,6 +333,49 @@ export interface TxnComment extends BaseRecord {
   body: string;
   createdAt: IsoDateTime;
   editedAt: IsoDateTime | null;
+}
+
+export type AttachmentKind = 'INSTRUCTION' | 'SUPPORTING' | 'PAPER_SIGNATURE';
+
+/** A file attached to a transaction. Several of each kind are allowed. */
+export interface Attachment extends BaseRecord {
+  txnId: string;
+  kind: AttachmentKind;
+  /** The approval a paper signature belongs to. */
+  approvalId: string | null;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  /** The file itself, as a data URL. Null for seeded placeholders. */
+  dataUrl: string | null;
+  uploadedBy: string;
+  uploadedAt: IsoDateTime;
+}
+
+export type RecallStatus = 'PENDING' | 'ACCEPTED' | 'DECLINED';
+/** TO_MAKER = back to the Treasury Officer; TO_REQUESTER = back to the person who asked. */
+export type RecallDecision = 'TO_MAKER' | 'TO_REQUESTER';
+
+/** Someone other than the maker asks the Treasury Officer to recall a submitted transaction. */
+export interface RecallRequest extends BaseRecord {
+  txnId: string;
+  requestedBy: string;
+  reason: string;
+  requestedAt: IsoDateTime;
+  status: RecallStatus;
+  decision: RecallDecision | null;
+  decidedBy: string | null;
+  decidedAt: IsoDateTime | null;
+  decisionNote: string;
+}
+
+/** Several transactions submitted together with one signature. */
+export interface TxnBatch extends BaseRecord {
+  batchRef: string;
+  makerId: string;
+  txnIds: string[];
+  note: string;
+  createdAt: IsoDateTime;
 }
 
 export type ImportRegister =

@@ -148,21 +148,21 @@ function AoView({ d }: { d: AoDashboard }) {
     <>
       <KpiGrid>
         <KpiTile
-          label="Call-backs pending"
+          label="To call and check"
           value={d.pending}
           tone={d.pending ? 'warning' : 'default'}
-          href="/callbacks"
+          href="/approvals"
         />
         <KpiTile label="Confirmed today" value={d.confirmedToday} />
         <KpiTile label="Unreachable / disputed today" value={d.failedToday} />
       </KpiGrid>
       <Card className="mt-5">
         <CardHeader
-          title="Call-back queue"
-          description="Customers waiting for a confirmation call"
+          title="Waiting for you"
+          description="Submitted by Treasury. Call the customer, then approve, return or reject."
           actions={
-            <LinkButton href="/callbacks" size="sm">
-              Open log
+            <LinkButton href="/approvals" size="sm">
+              Open queue
             </LinkButton>
           }
         />
@@ -183,7 +183,7 @@ function AoView({ d }: { d: AoDashboard }) {
                 <span className="flex flex-wrap items-center justify-end gap-2">
                   <SlaBadge sla={r.sla} />
                   <LinkButton href={`/transactions/${r.id}`} size="sm" icon={PhoneCall}>
-                    Call now
+                    {r.attempts ? 'Call again' : 'Call and check'}
                   </LinkButton>
                 </span>
               </li>
@@ -191,8 +191,8 @@ function AoView({ d }: { d: AoDashboard }) {
           </ul>
         ) : (
           <EmptyState
-            title="No calls waiting"
-            description="Call-backs appear here once the Treasury Officer verifies the signature."
+            title="Nothing waiting for you"
+            description="Transactions appear here as soon as the Treasury Officer submits them."
           />
         )}
       </Card>

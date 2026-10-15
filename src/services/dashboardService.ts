@@ -156,12 +156,13 @@ function approverDashboard(db: Db, userId: string, role: RoleCode): ApproverDash
     (a) => a.userId === userId && a.action === 'APPROVE' && isoDatePart(a.actedAt) === today
   ).length;
   const pipeline: Point[] = [
-    ['In verification', ['DRAFT', 'VERIFICATION', 'RETURNED']],
+    ['In preparation', ['DRAFT', 'VERIFICATION', 'RETURNED']],
+    ['Account Officer', ['PENDING_ACCOUNT_OFFICER']],
     ['Head Treasury', ['PENDING_HEAD_TREASURY']],
     ['MIS', ['PENDING_MIS']],
     ['Audit', ['PENDING_AUDIT']],
     ['MD', ['PENDING_MD']],
-    ['Operations', ['PENDING_OPERATIONS', 'EXEC_FAILED']],
+    ['Operations', ['PENDING_OPERATIONS', 'PENDING_OPS_APPROVAL', 'EXEC_FAILED']],
     ['Confirming', ['EXECUTED']],
   ].map(([label, statuses]) => {
     const rows = db.txns.filter((t) => (statuses as string[]).includes(t.status));
@@ -227,12 +228,9 @@ export const mockDashboardService: DashboardService = {
           return toDashboard(db, u.id);
         case 'AO': {
           const logs = db.callbacks.filter((c) => c.officerId === u.id && c.callDate === today);
-          const queue = filterTxns(db, { status: ['VERIFICATION', 'RETURNED'] }, now)
-            .filter((t) => {
-              const ctl = (code: string) =>
-                db.controls.find((c) => c.txnId === t.id && c.controlCode === code)?.state;
-              return ctl('C02') === 'PASSED' && ctl('C03') !== 'PASSED';
-            })
+          // Submitted transactions waiting for this officer to call the customer and check them.
+          const queue = filterTxns(db, { status: ['PENDING_ACCOUNT_OFFICER'] }, now)
+            .filter((t) => !wf.approvalBlocker(db, t, u))
             .map((t) => {
               const list = db.callbacks.filter((c) => c.txnId === t.id);
               return {
@@ -257,7 +255,7 @@ export const mockDashboardService: DashboardService = {
           return approverDashboard(db, u.id, u.roleCode);
         case 'OPS': {
           const rows = db.txns.filter((t) =>
-            ['PENDING_OPERATIONS', 'EXEC_FAILED'].includes(t.status)
+            ['PENDING_OPERATIONS', 'PENDING_OPS_APPROVAL', 'EXEC_FAILED'].includes(t.status)
           );
           const payout = (id: string) =>
             add(
@@ -282,6 +280,17 @@ export const mockDashboardService: DashboardService = {
                 db.executions.filter((e) => e.txnId === t.id && e.status === 'FAILED').pop()
                   ?.failureReason ?? null,
               payoutAmt: payout(t.id),
+              prepared: (() => {
+                const prep = wf.preparedPosting(db, t.id);
+                return prep
+                  ? {
+                      cbsPostingRef: prep.cbsPostingRef ?? '',
+                      preparedBy: findById(db, 'users', prep.executedBy)?.fullName ?? '',
+                      preparedAt: prep.executedAt,
+                    }
+                  : null;
+              })(),
+              approveBlocker: wf.opsApprovalBlocker(db, t, u),
             })),
           };
         }

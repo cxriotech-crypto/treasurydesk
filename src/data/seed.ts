@@ -60,6 +60,7 @@ const DEMO_USERS: { fullName: string; role: RoleCode; staffId: string }[] = [
   { fullName: 'Olumide Adeyemi', role: 'AUD', staffId: 'FMT-0076' },
   { fullName: 'Mrs. Folake Adebayo', role: 'MD', staffId: 'FMT-0001' },
   { fullName: 'Emeka Nwosu', role: 'OPS', staffId: 'FMT-0164' },
+  { fullName: 'Funmilayo Adeleke', role: 'OPS', staffId: 'FMT-0171' },
   { fullName: 'Kelechi Obi', role: 'ADM', staffId: 'FMT-0089' },
   { fullName: 'Ngozi Uchenna', role: 'AO', staffId: 'FMT-0212' },
   { fullName: 'Bola Akande', role: 'AO', staffId: 'FMT-0219' },
@@ -353,13 +354,14 @@ function populate(db: Db, T: string, anchor: string) {
   );
   const byRole = (r: RoleCode) => users.find((u) => u.roleCode === r)!;
   const TO = byRole('TO');
-  const OPS = byRole('OPS');
+  const [OPS, OPS2] = users.filter((u) => u.roleCode === 'OPS');
   const aos = users.filter((u) => u.roleCode === 'AO');
+  // Level 2 is the customer's own Account Officer; the rest are fixed.
   const approverFor: Record<number, AppUser> = {
-    2: byRole('HT'),
-    3: byRole('MIS'),
-    4: byRole('AUD'),
-    5: byRole('MD'),
+    3: byRole('HT'),
+    4: byRole('MIS'),
+    5: byRole('AUD'),
+    6: byRole('MD'),
   };
 
   for (const [bankCode, bankName, shortName, active] of BANKS)
@@ -686,11 +688,13 @@ function populate(db: Db, T: string, anchor: string) {
     | 'COMPLETED'
     | 'EXECUTED'
     | 'PENDING_OPERATIONS'
+    | 'PENDING_OPS_APPROVAL'
     | 'EXEC_FAILED'
     | 'PENDING_MD'
     | 'PENDING_AUDIT'
     | 'PENDING_MIS'
     | 'PENDING_HEAD_TREASURY'
+    | 'PENDING_ACCOUNT_OFFICER'
     | 'DRAFT'
     | 'VERIFICATION'
     | 'STOPPED'
@@ -718,6 +722,16 @@ function populate(db: Db, T: string, anchor: string) {
     returnedOnceAt?: number;
     /** Final return / reject level. */
     stopAt?: number;
+    /** Submitted together with the other plans carrying the same key. */
+    batchKey?: string;
+    /** Signed on paper at this level and uploaded by the maker. */
+    paperAt?: number;
+    /** Once at the target: the maker recalls it, or the last signer asks for a recall. */
+    recall?: 'MAKER' | 'REQUEST';
+    /** A supporting document added along the way. */
+    supporting?: boolean;
+    /** The Account Officer's first call did not get through. */
+    failedCallFirst?: boolean;
   }
 
   const plans: Plan[] = [];
@@ -922,8 +936,10 @@ function populate(db: Db, T: string, anchor: string) {
   recent('ROLLOVER_C', 'EXECUTED');
   recent('TRANSFER_SS_PA', 'EXECUTED');
   recent('MATURITY', 'PENDING_OPERATIONS', { external: true });
-  recent('INFLOW', 'PENDING_OPERATIONS');
+  recent('INFLOW', 'PENDING_OPERATIONS', { paperAt: 6 });
   recent('THIRD_PARTY_INT', 'PENDING_OPERATIONS');
+  recent('TRANSFER_PA_CP', 'PENDING_OPS_APPROVAL');
+  recent('ROLLOVER_D', 'PENDING_OPS_APPROVAL', { supporting: true });
   recent('THIRD_PARTY_EXT', 'EXEC_FAILED');
   recent('PRELIQ_FULL', 'EXEC_FAILED', { external: true });
 
@@ -947,10 +963,11 @@ function populate(db: Db, T: string, anchor: string) {
   ];
   let rot = 0;
   const levels: [Target, number][] = [
-    ['PENDING_HEAD_TREASURY', 2],
-    ['PENDING_MIS', 3],
-    ['PENDING_AUDIT', 4],
-    ['PENDING_MD', 5],
+    ['PENDING_ACCOUNT_OFFICER', 2],
+    ['PENDING_HEAD_TREASURY', 3],
+    ['PENDING_MIS', 4],
+    ['PENDING_AUDIT', 5],
+    ['PENDING_MD', 6],
   ];
   for (const [target] of levels) {
     for (let i = 0; i < 8; i++) {
@@ -965,17 +982,30 @@ function populate(db: Db, T: string, anchor: string) {
       }
       const scenario = rotation[rot++ % rotation.length];
       const extra: Partial<Plan> = { external: rng.chance(0.35) };
-      if (target === 'PENDING_AUDIT' && i === 0) extra.returnedOnceAt = 3;
-      if (target === 'PENDING_MD' && i === 0) extra.returnedOnceAt = 2;
+      if (target === 'PENDING_AUDIT' && i === 0) extra.returnedOnceAt = 4;
+      if (target === 'PENDING_MD' && i === 0) extra.returnedOnceAt = 3;
+      if (target === 'PENDING_ACCOUNT_OFFICER' && i === 1) extra.failedCallFirst = true;
+      if (target === 'PENDING_MD' && i === 2) extra.paperAt = 5;
+      if (target === 'PENDING_MIS' && i === 2) extra.recall = 'REQUEST';
+      if (target === 'PENDING_AUDIT' && i === 3) extra.supporting = true;
+      // Three submitted together as one batch, now at different stages.
+      if (i === 4 && ['PENDING_HEAD_TREASURY', 'PENDING_MIS', 'PENDING_AUDIT'].includes(target))
+        extra.batchKey = 'B1';
       recent(scenario, target, extra);
     }
   }
   recent('ROLLOVER_A', 'DRAFT');
   recent('PRELIQ_PARTIAL', 'VERIFICATION');
   recent('THIRD_PARTY_EXT', 'STOPPED');
-  recent('ANNIVERSARY', 'RETURNED', { stopAt: 4 });
-  recent('TRANSFER_PA_CP', 'REJECTED', { stopAt: 2 });
+  recent('ANNIVERSARY', 'RETURNED', { stopAt: 5 });
+  // The Account Officer, as checker, sends one back after calling the customer.
+  recent('THIRD_PARTY_INT', 'RETURNED', { stopAt: 2 });
+  recent('MATURITY', 'RETURNED', { recall: 'MAKER', stopAt: 4 });
+  recent('TRANSFER_PA_CP', 'REJECTED', { stopAt: 3 });
   recent('INFLOW', 'CANCELLED');
+  // A second batch: two items, both still with their Account Officers.
+  recent('TRANSFER_SS_PA', 'PENDING_ACCOUNT_OFFICER', { batchKey: 'B2' });
+  recent('THIRD_PARTY_EXT', 'PENDING_ACCOUNT_OFFICER', { batchKey: 'B2' });
 
   // ─── Replay ───────────────────────────────────────────────────────────
   interface Step {
@@ -991,6 +1021,19 @@ function populate(db: Db, T: string, anchor: string) {
   const gapsRef = (at: string) =>
     `GAPS-${at.slice(0, 10).replace(/-/g, '')}-${String(nextCounter(db, 'gapsRef')).padStart(6, '0')}`;
   const sign = (u: AppUser) => ({ signatureName: u.fullName, pin: '1234' });
+  const batchGroups = new Map<string, { at: string; keys: string[] }>();
+  /**
+   * A new maturity that falls on a weekend or holiday would block signing (the app asks the user to
+   * move it). The seed accepts the suggestion the way a user would, before submitting.
+   */
+  const moveOffNonBusinessMaturity = (txnId: string, when: string) => {
+    const txn = findById(db, 'txns', txnId)!;
+    const prompt = wf.computeFor(db, txn, isoDatePart(when)).maturityPrompt;
+    if (!prompt) return;
+    wf.updateDraft({ userId: TO.id, at: when }, txnId, {
+      input: { ...txn.input, [prompt.field]: prompt.suggestedTenorDays },
+    });
+  };
   const RETURN_NOTES = [
     'Remarks do not carry the beneficiary account number. Please correct.',
     'Instruction scan is not legible – attach a clearer copy.',
@@ -1000,6 +1043,18 @@ function populate(db: Db, T: string, anchor: string) {
     'Customer withdrew the instruction by phone.',
     'Rate is outside the approved pricing grid.',
   ];
+
+  // Members of a batch share one timeline, so the batch is submitted before any of them moves on.
+  const firstOfBatch = new Map<string, Plan>();
+  for (const p of plans) {
+    if (!p.batchKey) continue;
+    const first = firstOfBatch.get(p.batchKey);
+    if (!first) firstOfBatch.set(p.batchKey, p);
+    else {
+      p.start = first.start;
+      p.gap = first.gap;
+    }
+  }
 
   for (const p of plans) {
     let t = 0;
@@ -1080,8 +1135,14 @@ function populate(db: Db, T: string, anchor: string) {
           'Personal use',
           'Property payment',
         ]),
-        documentName: `instruction-${txn.txnRef}.pdf`,
-        documentData: null,
+        documents: [
+          {
+            fileName: `instruction-${txn.txnRef}.pdf`,
+            mimeType: 'application/pdf',
+            sizeBytes: 184_320,
+            dataUrl: null,
+          },
+        ],
         payDestination: external ? 'EXTERNAL' : 'INTERNAL',
         benefName: external
           ? (benef?.benefName ?? subj.customer.customerName)
@@ -1129,28 +1190,8 @@ function populate(db: Db, T: string, anchor: string) {
         completeOk: true,
       })
     );
-    // 3. call-back (by the customer's Account Officer)
-    const cbAt = at();
-    const failCall = p.target === 'VERIFICATION';
-    push(cbAt, () => {
-      const c = subj.customer;
-      wf.logCallback(ctxOf(c.accountOfficerId, cbAt), id(), {
-        phoneCalled: c.regPhone,
-        callDate: isoDatePart(cbAt),
-        callTime: isoTimePart(cbAt),
-        officerId: c.accountOfficerId,
-        amountOk: !failCall,
-        instrOk: !failCall,
-        benefOk: !failCall,
-        purposeOk: !failCall,
-        outcome: failCall ? 'UNREACHABLE' : 'CONFIRMED',
-        notes: failCall
-          ? 'Phone switched off. Will try again after 2pm.'
-          : 'Customer confirmed amount, instruction, beneficiary and purpose.',
-      });
-    });
-    if (failCall) continue;
-    // 4. Eazybankz
+    if (p.target === 'VERIFICATION') continue;
+    // 3. Eazybankz
     const cbsAt = at();
     push(cbsAt, () =>
       wf.confirmCbs(ctxOf(TO, cbsAt), id(), {
@@ -1159,102 +1200,215 @@ function populate(db: Db, T: string, anchor: string) {
         sourceConfirmed: true,
       })
     );
-    // 5. sign & submit
+    // 4. sign & submit — on its own, or with the rest of its batch.
     const subAt = at();
-    push(subAt, () => wf.signAndSubmit(ctxOf(TO, subAt), id(), sign(TO)));
+    if (p.batchKey) {
+      const group = batchGroups.get(p.batchKey) ?? { at: subAt, keys: [] as string[] };
+      group.keys.push(p.key);
+      if (parseIso(subAt) > parseIso(group.at)) group.at = subAt;
+      batchGroups.set(p.batchKey, group);
+    } else {
+      push(subAt, () => {
+        moveOffNonBusinessMaturity(id(), subAt);
+        wf.signAndSubmit(ctxOf(TO, subAt), id(), sign(TO));
+      });
+    }
 
     const targetLevel: Record<Target, number> = {
-      PENDING_HEAD_TREASURY: 2,
-      PENDING_MIS: 3,
-      PENDING_AUDIT: 4,
-      PENDING_MD: 5,
-      PENDING_OPERATIONS: 6,
-      EXEC_FAILED: 6,
-      EXECUTED: 6,
-      COMPLETED: 6,
-      RETURNED: p.stopAt ?? 2,
-      REJECTED: p.stopAt ?? 2,
+      PENDING_ACCOUNT_OFFICER: 2,
+      PENDING_HEAD_TREASURY: 3,
+      PENDING_MIS: 4,
+      PENDING_AUDIT: 5,
+      PENDING_MD: 6,
+      PENDING_OPERATIONS: 7,
+      PENDING_OPS_APPROVAL: 7,
+      EXEC_FAILED: 7,
+      EXECUTED: 7,
+      COMPLETED: 7,
+      RETURNED: p.stopAt ?? 3,
+      REJECTED: p.stopAt ?? 3,
       DRAFT: 0,
       VERIFICATION: 0,
       STOPPED: 0,
       CANCELLED: 0,
     };
     const upto = targetLevel[p.target];
+    const aoOf = () => subj.customer.accountOfficerId;
+    const signerAt = (lvl: number): string => (lvl === 2 ? aoOf() : approverFor[lvl].id);
 
-    // Optional earlier cycle: returned at a level, corrected and resubmitted.
-    if (p.returnedOnceAt) {
-      for (let lvl = 2; lvl < p.returnedOnceAt; lvl++) {
-        const w = at();
-        push(w, () =>
-          wf.approve(ctxOf(approverFor[lvl], w), id(), {
-            ...sign(approverFor[lvl]),
-            comments: 'Checked.',
+    /** One approval level: the AO calls first, Audit re-verifies, a paper level is uploaded. */
+    const approveLevel = (lvl: number, comments: string) => {
+      if (lvl === 2) {
+        if (p.failedCallFirst) {
+          const w0 = at();
+          push(w0, () => logCall(aoOf(), w0, false));
+        }
+        const wc = at();
+        push(wc, () => logCall(aoOf(), wc, true));
+      }
+      if (lvl === 5 && p.paperAt !== 5) {
+        const wv = at();
+        push(wv, () =>
+          wf.auditVerify(ctxOf(approverFor[5], wv), id(), {
+            sigOk: true,
+            mandateOk: true,
+            ownershipOk: true,
+            completeOk: true,
           })
         );
       }
+      const w = at();
+      if (p.paperAt === lvl) {
+        push(w, () =>
+          wf.recordPaperApproval(ctxOf(TO, w), id(), {
+            signedBy: signerAt(lvl),
+            reason: 'Travelling; signed the printed voucher and returned the scan by email',
+            documents: [
+              {
+                fileName: `signed-voucher-level-${lvl}.pdf`,
+                mimeType: 'application/pdf',
+                sizeBytes: 241_664,
+                dataUrl: null,
+              },
+            ],
+          })
+        );
+        return;
+      }
+      push(w, () => {
+        const u = findById(db, 'users', signerAt(lvl))!;
+        wf.approve(ctxOf(u, w), id(), { ...sign(u), comments });
+      });
+    };
+    const logCall = (aoId: string, when: string, ok: boolean) => {
+      const c = subj.customer;
+      wf.logCallback(ctxOf(aoId, when), id(), {
+        phoneCalled: c.regPhone,
+        callDate: isoDatePart(when),
+        callTime: isoTimePart(when),
+        officerId: aoId,
+        amountOk: ok,
+        instrOk: ok,
+        benefOk: ok,
+        purposeOk: ok,
+        outcome: ok ? 'CONFIRMED' : 'UNREACHABLE',
+        notes: ok
+          ? 'Customer confirmed amount, instruction, beneficiary and purpose.'
+          : 'Phone switched off. Will try again shortly.',
+      });
+    };
+    const decideAt = (lvl: number, w: string, fn: typeof wf.returnToMaker, note: string) => {
+      if (lvl === 2) {
+        const wc = addMinutes(w, -1);
+        push(wc, () => logCall(aoOf(), wc, true));
+      }
+      push(w, () => fn(ctxOf(signerAt(lvl), w), id(), note));
+    };
+
+    // Optional earlier cycle: returned at a level, corrected and resubmitted from scratch.
+    if (p.returnedOnceAt) {
+      for (let lvl = 2; lvl < p.returnedOnceAt; lvl++) approveLevel(lvl, 'Checked.');
       const rw = at();
-      push(rw, () =>
-        wf.returnToMaker(ctxOf(approverFor[p.returnedOnceAt!], rw), id(), rng.pick(RETURN_NOTES))
-      );
+      decideAt(p.returnedOnceAt, rw, wf.returnToMaker, rng.pick(RETURN_NOTES));
       const rs = at();
-      push(rs, () =>
+      push(rs, () => {
+        moveOffNonBusinessMaturity(id(), rs);
         wf.signAndSubmit(ctxOf(TO, rs), id(), {
           ...sign(TO),
           comments: 'Corrected as advised and resubmitted.',
-        })
+        });
+      });
+    }
+    if (p.supporting) {
+      const w = at();
+      push(w, () =>
+        wf.addSupportingDocuments(ctxOf(TO, w), id(), [
+          {
+            fileName: 'customer-letter-page-2.pdf',
+            mimeType: 'application/pdf',
+            sizeBytes: 98_304,
+            dataUrl: null,
+          },
+          {
+            fileName: 'board-resolution.pdf',
+            mimeType: 'application/pdf',
+            sizeBytes: 156_672,
+            dataUrl: null,
+          },
+        ])
       );
     }
     // Approvals up to the target.
     const lastApprove =
-      p.target === 'RETURNED' || p.target === 'REJECTED' ? upto - 1 : Math.min(upto - 1, 5);
-    for (let lvl = 2; lvl <= lastApprove; lvl++) {
+      p.target === 'RETURNED' || p.target === 'REJECTED' ? upto - 1 : Math.min(upto - 1, 6);
+    for (let lvl = 2; lvl <= lastApprove; lvl++)
+      approveLevel(lvl, lvl === 6 ? 'Approved.' : 'Reviewed – in order.');
+    if (p.recall === 'MAKER') {
       const w = at();
       push(w, () =>
-        wf.approve(ctxOf(approverFor[lvl], w), id(), {
-          ...sign(approverFor[lvl]),
-          comments: lvl === 5 ? 'Approved.' : 'Reviewed – in order.',
-        })
+        wf.recall(
+          ctxOf(TO, w),
+          id(),
+          'Customer asked to change the payment date; recalling to amend'
+        )
       );
+      continue;
     }
     if (p.target === 'RETURNED') {
-      const w = at();
-      push(w, () => wf.returnToMaker(ctxOf(approverFor[upto], w), id(), rng.pick(RETURN_NOTES)));
+      decideAt(upto, at(), wf.returnToMaker, rng.pick(RETURN_NOTES));
       continue;
     }
     if (p.target === 'REJECTED') {
-      const w = at();
-      push(w, () => wf.reject(ctxOf(approverFor[upto], w), id(), rng.pick(REJECT_NOTES)));
+      decideAt(upto, at(), wf.reject, rng.pick(REJECT_NOTES));
       continue;
     }
-    if (upto < 6 || p.target === 'PENDING_OPERATIONS') continue;
+    if (p.recall === 'REQUEST') {
+      const w = at();
+      push(w, () =>
+        wf.requestRecall(
+          ctxOf(signerAt(upto - 1), w),
+          id(),
+          'I signed before the revised rate letter arrived. Please send it back to me to re-check.'
+        )
+      );
+    }
+    if (upto < 7 || p.target === 'PENDING_OPERATIONS') continue;
 
-    // Operations.
-    const exec = (when: string, fail: boolean) =>
+    // Operations: one officer keys the posting, a second approves it.
+    const prepare = (when: string) =>
+      push(when, () => wf.prepareExecution(ctxOf(OPS, when), id(), postingRef(when)));
+    const approveOps = (when: string, fail: boolean) =>
       push(when, () => {
         const txn = findById(db, 'txns', id())!;
         const needs = wf.gapsRequired(db, txn);
-        wf.execute(ctxOf(OPS, when), id(), {
-          cbsPostingRef: postingRef(when),
-          gaps: needs
+        wf.approveExecution(
+          ctxOf(OPS2, when),
+          id(),
+          needs
             ? fail
               ? { ok: false, reason: rng.pick(wf.GAPS_FAILURE_REASONS) }
               : { ok: true, gapsRef: gapsRef(when) }
-            : null,
-        });
+            : null
+        );
       });
     const needsGapsPlan =
       p.scenario === 'THIRD_PARTY_EXT' ||
       (!!p.external &&
         SCENARIO_META[p.scenario].vouchers.includes('FO') &&
         p.scenario !== 'THIRD_PARTY_INT');
+    prepare(at());
+    if (p.target === 'PENDING_OPS_APPROVAL') continue;
     if (p.target === 'EXEC_FAILED') {
       if (!needsGapsPlan)
         throw new Error(`Seed: EXEC_FAILED plan ${p.key} needs an external payment`);
-      exec(at(), true);
+      approveOps(at(), true);
       continue;
     }
-    if (p.gapsFailFirst) exec(at(), true);
-    exec(at(), false);
+    if (p.gapsFailFirst) {
+      approveOps(at(), true);
+      prepare(at());
+    }
+    approveOps(at(), false);
     if (p.target === 'EXECUTED') continue;
     const confirmAt = p.breach
       ? lagosDateTime(
@@ -1263,6 +1417,21 @@ function populate(db: Db, T: string, anchor: string) {
         )
       : at();
     push(confirmAt, () => wf.confirmCompletion(ctxOf(TO, confirmAt), id()));
+  }
+
+  // Batches are submitted together once every member is ready.
+  for (const [key, group] of batchGroups) {
+    const when = addMinutes(group.at, 1);
+    steps.push({
+      at: when,
+      order: -1,
+      label: `batch ${key}`,
+      run: () => {
+        const ids = group.keys.map((k) => created.get(k)!);
+        for (const tid of ids) moveOffNonBusinessMaturity(tid, when);
+        wf.submitBatch({ userId: TO.id, at: when }, ids, sign(TO), 'Morning instructions');
+      },
+    });
   }
 
   steps.sort((a, b) => parseIso(a.at) - parseIso(b.at) || a.order - b.order);

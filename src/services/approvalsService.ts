@@ -23,6 +23,8 @@ export interface ApprovalRow extends TxnRow {
   blocker: string | null;
   /** The note left by the last person who signed this round, for the approver receiving it. */
   lastNote: ApprovalNote | null;
+  /** What must happen before this can be approved (the AO's call, Audit's check), or null. */
+  approveReady: string | null;
 }
 
 export interface ApprovalNote {
@@ -52,7 +54,7 @@ export interface ApprovalsService {
   bulkApprove(txnIds: string[], sign: wf.SignArgs): Promise<BulkResult>;
 }
 
-const APPROVER_ROLES = ['HT', 'MIS', 'AUD', 'MD'] as const;
+const APPROVER_ROLES = ['AO', 'HT', 'MIS', 'AUD', 'MD'] as const;
 
 /** Every note left by this round's signatures, oldest first, for whoever receives the file next. */
 export function approvalNotes(db: Db, txnId: string, cycleNo: number): ApprovalNote[] {
@@ -100,6 +102,7 @@ export const mockApprovalsService: ApprovalsService = {
           waitingMinutes: minutesBetween(arrived ?? r.updatedAt, now),
           blocker: wf.approvalBlocker(db, r as TreasuryTxn, u),
           lastNote: lastApprovalNote(db, r.id, r.cycleNo),
+          approveReady: wf.approveRequirement(db, r as TreasuryTxn),
         };
       });
       const paged = paginate(rows, { sort: { field: 'waitingMinutes', dir: 'desc' }, ...q });

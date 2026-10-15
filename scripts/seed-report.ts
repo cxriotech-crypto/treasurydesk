@@ -35,15 +35,21 @@ function table(title: string, rows: Record<string, number>, order?: readonly str
 }
 
 // Controls that must be PASSED for each status (the rest PENDING, except noted failures).
+// The Treasury Officer signs first (C05, C06), then the Account Officer's check passes C03.
+const SUBMITTED: ControlCode[] = ['C01', 'C02', 'C04', 'C05', 'C06'];
+const APPROVED: ControlCode[] = [...SUBMITTED, 'C03', 'C07', 'C08', 'C09', 'C10'];
 const PASSED_FOR: Partial<Record<TxnStatus, ControlCode[]>> = {
   DRAFT: [],
-  PENDING_HEAD_TREASURY: ['C01', 'C02', 'C03', 'C04', 'C05', 'C06'],
-  PENDING_MIS: ['C01', 'C02', 'C03', 'C04', 'C05', 'C06', 'C07'],
-  PENDING_AUDIT: ['C01', 'C02', 'C03', 'C04', 'C05', 'C06', 'C07', 'C08'],
-  PENDING_MD: ['C01', 'C02', 'C03', 'C04', 'C05', 'C06', 'C07', 'C08', 'C09'],
-  PENDING_OPERATIONS: ['C01', 'C02', 'C03', 'C04', 'C05', 'C06', 'C07', 'C08', 'C09', 'C10'],
-  EXEC_FAILED: ['C01', 'C02', 'C03', 'C04', 'C05', 'C06', 'C07', 'C08', 'C09', 'C10'],
-  EXECUTED: ['C01', 'C02', 'C03', 'C04', 'C05', 'C06', 'C07', 'C08', 'C09', 'C10', 'C11'],
+  VERIFICATION: ['C01', 'C02'],
+  PENDING_ACCOUNT_OFFICER: SUBMITTED,
+  PENDING_HEAD_TREASURY: [...SUBMITTED, 'C03'],
+  PENDING_MIS: [...SUBMITTED, 'C03', 'C07'],
+  PENDING_AUDIT: [...SUBMITTED, 'C03', 'C07', 'C08'],
+  PENDING_MD: [...SUBMITTED, 'C03', 'C07', 'C08', 'C09'],
+  PENDING_OPERATIONS: APPROVED,
+  PENDING_OPS_APPROVAL: APPROVED,
+  EXEC_FAILED: APPROVED,
+  EXECUTED: [...APPROVED, 'C11'],
 };
 
 function checkInvariants(db: Db) {
@@ -127,10 +133,23 @@ function checkInvariants(db: Db) {
         fail(`${t.txnRef}: maker acted at level ${a.levelNo}`);
       if (a.levelNo === 1 && a.userId !== t.makerId)
         fail(`${t.txnRef}: level 1 not signed by maker`);
+      if (a.channel === 'PAPER' && a.recordedBy !== t.makerId)
+        fail(`${t.txnRef}: paper signature not uploaded by the maker`);
     }
-    const byCycle = countBy(aps, (a) => `${a.cycleNo}:${a.userId}`);
+    // Signatures that still count: one per person per cycle.
+    const signatures = aps.filter((a) => a.action === 'APPROVE' && !a.superseded);
+    const byCycle = countBy(signatures, (a) => `${a.cycleNo}:${a.userId}`);
     for (const [k, n] of Object.entries(byCycle))
       if (n > 1) fail(`${t.txnRef}: user signed twice in cycle (${k})`);
+    // Two people in Operations: whoever keyed a posting never approved it.
+    for (const e of db.executions.filter((x) => x.txnId === t.id && x.approvedBy))
+      if (e.approvedBy === e.executedBy)
+        fail(`${t.txnRef}: posting ${e.cbsPostingRef} keyed and approved by the same officer`);
+    // Internal Audit re-verified the signature before signing (in the app or on paper).
+    const audSigned = signatures.some((a) => a.roleCode === 'AUD' && a.cycleNo === t.cycleNo);
+    const ver = db.verifications.find((v) => v.txnId === t.id);
+    if (audSigned && ver?.auditCycleNo !== t.cycleNo)
+      fail(`${t.txnRef}: Audit signed without re-verifying the signature`);
 
     // Controls
     const ctl = db.controls.filter((c) => c.txnId === t.id);
@@ -211,12 +230,19 @@ table(
 
 const byStatus = countBy(db.txns, (t) => t.status);
 for (const s of TXN_STATUSES) if (!byStatus[s]) fail(`No transaction in status ${s}`);
-for (const s of ['PENDING_HEAD_TREASURY', 'PENDING_MIS', 'PENDING_AUDIT', 'PENDING_MD'] as const) {
+for (const s of [
+  'PENDING_ACCOUNT_OFFICER',
+  'PENDING_HEAD_TREASURY',
+  'PENDING_MIS',
+  'PENDING_AUDIT',
+  'PENDING_MD',
+] as const) {
   if ((byStatus[s] ?? 0) < 8) fail(`Fewer than 8 transactions in ${s}`);
 }
 const byType = countBy(db.txns, (t) => t.txnType);
 for (const t of TXN_TYPES) if (!byType[t]) fail(`No transaction of type ${t}`);
-if (db.txns.length !== 60) fail(`Expected 60 transactions, found ${db.txns.length}`);
+// The brief's 60, plus a level of 8 for the Account Officer and the batch, recall and paper examples.
+if (db.txns.length < 60) fail(`Expected at least 60 transactions, found ${db.txns.length}`);
 
 const breaches = db.controls.filter((c) => c.controlCode === 'C12' && c.state === 'FAILED').length;
 const cycle2 = db.txns.filter((t) => t.cycleNo > 1).length;
@@ -278,7 +304,12 @@ console.log(
 console.log(
   `  Notifications ${db.notifications.length} · Audit events ${db.audit.length} (${integrity.message})`
 );
-if (db.users.length !== 11) fail('Expected 11 users');
+if (db.users.length !== 12) fail('Expected 12 users');
+if (db.users.filter((u) => u.roleCode === 'OPS').length < 2)
+  fail('Two Operations officers are needed for the two-person check');
+if (!db.batches.length) fail('No batch in the demo data');
+if (!db.recalls.some((r) => r.status === 'PENDING')) fail('No pending recall request');
+if (!db.approvals.some((a) => a.channel === 'PAPER')) fail('No paper signature in the demo data');
 if (db.banks.length !== 20) fail('Expected 20 banks');
 if (db.customers.length !== 40 || cust.IND !== 28 || cust.CORP !== 12)
   fail('Expected 40 customers (28 IND, 12 CORP)');

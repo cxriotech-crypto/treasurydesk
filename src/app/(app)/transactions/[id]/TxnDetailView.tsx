@@ -7,10 +7,15 @@ import {
   CheckCircle2,
   CornerUpLeft,
   FilePenLine,
+  FileSignature,
+  KeyRound,
+  Layers,
+  MoreHorizontal,
   PenLine,
   PhoneCall,
-  PlayCircle,
   Printer,
+  RotateCcw,
+  ShieldCheck,
   Undo2,
   XCircle,
   XOctagon,
@@ -37,6 +42,7 @@ import {
   CardBody,
   ConfirmDialog,
   DescriptionList,
+  DropdownMenu,
   ErrorState,
   InlineAlert,
   LinkButton,
@@ -56,21 +62,34 @@ import { StageProgress } from '@/components/txn/StageProgress';
 import { ControlsChecklist } from '@/components/txn/Controls';
 import { VoucherView } from '@/components/txn/VoucherView';
 import { CallbackForm, CallbackHistory } from '@/components/txn/CallbackForm';
-import { DocumentPreview } from '@/components/txn/Specimen';
+import { DocumentList } from '@/components/txn/Documents';
 import { ExecuteDrawer } from '@/components/txn/ExecutePanel';
 import { CommentsPanel, AuditList, Timeline } from './panels';
+import { AuditVerifyModal, DecideRecallModal, DocumentsPanel, PaperSignatureModal } from './extras';
 
 type TabKey =
   | 'summary'
   | 'vouchers'
   | 'instruction'
   | 'verification'
+  | 'documents'
   | 'controls'
   | 'timeline'
   | 'comments'
   | 'audit';
 type Dialog =
-  null | 'approve' | 'return' | 'reject' | 'cancel' | 'confirm' | 'callback' | 'execute';
+  | null
+  | 'approve'
+  | 'return'
+  | 'reject'
+  | 'cancel'
+  | 'confirm'
+  | 'callback'
+  | 'execute'
+  | 'auditVerify'
+  | 'paper'
+  | 'recall'
+  | 'requestRecall';
 
 const yes = (v: boolean | undefined) => (v ? <Badge tone="success">Yes</Badge> : <Badge>No</Badge>);
 
@@ -114,6 +133,7 @@ function Summary({ d }: { d: TxnDetail }) {
                 value: subject,
               },
               { label: 'Maker', value: d.maker.fullName },
+              { label: 'Account Officer', value: d.accountOfficerName },
               { label: 'Created', value: formatDateTime(t.createdAt) },
               { label: 'Instruction received', value: formatDateTime(t.receivedAt) },
               { label: 'Submitted', value: formatDateTime(t.submittedAt) },
@@ -265,7 +285,12 @@ function Instruction({ d }: { d: TxnDetail }) {
             : []),
         ]}
       />
-      <DocumentPreview name={i.documentName} data={i.documentData} />
+      <DocumentList
+        items={d.attachments
+          .filter((a) => a.kind === 'INSTRUCTION')
+          .map((a) => ({ ...a, caption: `uploaded by ${a.uploadedByName}` }))}
+        empty="No instruction documents attached."
+      />
     </div>
   );
 }
@@ -284,6 +309,14 @@ function Verification({ d }: { d: TxnDetail }) {
           {
             label: 'Verified by',
             value: v?.verifiedBy ? `${d.maker.fullName} · ${formatDateTime(v.verifiedAt)}` : '—',
+          },
+          {
+            label: 'Re-verified by Internal Audit',
+            value: d.auditVerified
+              ? `Yes · ${formatDateTime(v?.auditVerifiedAt)}`
+              : d.txn.status === 'PENDING_AUDIT'
+                ? 'Not yet'
+                : '—',
           },
           {
             label: 'Confirmed in Eazybankz',
@@ -317,6 +350,7 @@ export function TxnDetailView({ id }: { id: string }) {
   const q = useData(() => transactionsService.get(id), [id]);
   const [tab, setTab] = useState<TabKey>('summary');
   const [dialog, setDialog] = useState<Dialog>(null);
+  const [recallFor, setRecallFor] = useState<string | null>(null);
   const close = () => setDialog(null);
 
   if (q.error && !q.data) return <ErrorState error={q.error} onRetry={q.reload} />;
@@ -335,12 +369,38 @@ export function TxnDetailView({ id }: { id: string }) {
       position: APPROVAL_LEVELS[a.levelNo - 1].label,
       note: a.comments.trim(),
     }));
-  // The call-back does not block, so an unconfirmed one is shown to whoever opens the transaction.
-  const callbackOutstanding =
-    d.controls.find((c) => c.controlCode === 'C03')?.state !== 'PASSED' &&
-    !['DRAFT', 'STOPPED', 'REJECTED', 'CANCELLED'].includes(t.status);
   const level = levelForStatus(t.status);
-  const isApprover = role === 'HT' || role === 'MIS' || role === 'AUD' || role === 'MD';
+  const isApprover =
+    role === 'AO' || role === 'HT' || role === 'MIS' || role === 'AUD' || role === 'MD';
+  const pendingRecalls = d.recalls.filter((r) => r.status === 'PENDING');
+  const myRequest = pendingRecalls.find((r) => r.requestedBy === me?.id);
+  const recalled = t.status === 'RETURNED' && t.returnComment?.startsWith('Recalled by');
+  const prepared = d.executions.find((e) => e.status === 'PREPARED');
+  const more = [
+    ...(!a.paperSign
+      ? [
+          {
+            key: 'paper',
+            label: `Record paper signature (${level?.label})`,
+            icon: FileSignature,
+            onSelect: () => setDialog('paper'),
+          },
+        ]
+      : []),
+    ...(!a.recall
+      ? [{ key: 'recall', label: 'Recall', icon: RotateCcw, onSelect: () => setDialog('recall') }]
+      : []),
+    ...(!a.requestRecall
+      ? [
+          {
+            key: 'request',
+            label: 'Request a recall',
+            icon: RotateCcw,
+            onSelect: () => setDialog('requestRecall'),
+          },
+        ]
+      : []),
+  ];
 
   const raiseReversal = async () => {
     try {
@@ -369,7 +429,7 @@ export function TxnDetailView({ id }: { id: string }) {
         <Button
           variant="primary"
           icon={PenLine}
-          disabledReason={a.approve}
+          disabledReason={a.approve ?? a.approveReady}
           onClick={() => setDialog('approve')}
         >
           Approve &amp; sign
@@ -382,6 +442,7 @@ export function TxnDetailView({ id }: { id: string }) {
     { key: 'vouchers', label: 'Vouchers', count: d.vouchers.length || undefined },
     { key: 'instruction', label: 'Instruction' },
     { key: 'verification', label: 'Verification & call-back' },
+    { key: 'documents', label: 'Documents', count: d.attachments.length || undefined },
     {
       key: 'controls',
       label: 'Controls',
@@ -408,6 +469,14 @@ export function TxnDetailView({ id }: { id: string }) {
           <>
             <TxnStatusBadge status={t.status} />
             <SlaBadge sla={d.sla} />
+            {d.batch ? (
+              <Link
+                href={`/batches/${d.batch.id}`}
+                className="inline-flex items-center gap-1 text-[13px] text-muted hover:text-fg hover:underline"
+              >
+                <Layers size={14} strokeWidth={1.75} aria-hidden /> {d.batch.batchRef}
+              </Link>
+            ) : null}
             <span className="num text-sm font-semibold">{formatNaira(t.headlineAmt)}</span>
           </>
         }
@@ -432,14 +501,29 @@ export function TxnDetailView({ id }: { id: string }) {
                 Cancel
               </Button>
             ) : null}
+            {!a.auditVerify ? (
+              <Button icon={ShieldCheck} onClick={() => setDialog('auditVerify')}>
+                Verify signature
+              </Button>
+            ) : null}
             {role === 'OPS' && ['PENDING_OPERATIONS', 'EXEC_FAILED'].includes(t.status) ? (
               <Button
                 variant="primary"
-                icon={PlayCircle}
+                icon={KeyRound}
                 disabledReason={a.execute}
                 onClick={() => setDialog('execute')}
               >
-                {t.status === 'EXEC_FAILED' ? 'Retry execution' : 'Execute'}
+                {t.status === 'EXEC_FAILED' ? 'Key posting again' : 'Key posting'}
+              </Button>
+            ) : null}
+            {role === 'OPS' && t.status === 'PENDING_OPS_APPROVAL' ? (
+              <Button
+                variant="primary"
+                icon={CheckCircle2}
+                disabledReason={a.opsApprove}
+                onClick={() => setDialog('execute')}
+              >
+                Approve posting
               </Button>
             ) : null}
             {role === 'TO' && t.status === 'EXECUTED' ? (
@@ -451,6 +535,23 @@ export function TxnDetailView({ id }: { id: string }) {
               <Button icon={Undo2} disabledReason={a.reverse} onClick={raiseReversal}>
                 Raise reversal
               </Button>
+            ) : null}
+            {more.length ? (
+              <DropdownMenu
+                label="More actions"
+                items={more}
+                trigger={({ toggle, open, id }) => (
+                  <Button
+                    icon={MoreHorizontal}
+                    aria-label="More actions"
+                    aria-expanded={open}
+                    aria-controls={id}
+                    onClick={toggle}
+                  >
+                    More
+                  </Button>
+                )}
+              />
             ) : null}
             <span className="hidden md:contents">{approvalButtons}</span>
           </>
@@ -473,19 +574,65 @@ export function TxnDetailView({ id }: { id: string }) {
           </InlineAlert>
         </div>
       ) : null}
-      {callbackOutstanding ? (
+      {pendingRecalls.length && role === 'TO' && t.makerId === me?.id ? (
         <div className="mb-4">
-          <InlineAlert tone="warning" title="Customer call-back outstanding">
-            {d.accountOfficerName} has not confirmed this instruction with {d.customer.customerName}{' '}
-            yet. The call-back is recorded but does not stop the transaction, so check it before you
-            sign.
+          <InlineAlert tone="warning" title="Recall requested">
+            <ul className="space-y-2">
+              {pendingRecalls.map((r) => (
+                <li key={r.id} className="flex flex-wrap items-center justify-between gap-2">
+                  <span>
+                    <span className="font-medium">
+                      {r.requestedByName}, {r.requestedByRole}:
+                    </span>{' '}
+                    {r.reason}
+                  </span>
+                  <Button size="sm" onClick={() => setRecallFor(r.id)}>
+                    Answer
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          </InlineAlert>
+        </div>
+      ) : null}
+      {myRequest ? (
+        <div className="mb-4">
+          <InlineAlert tone="info" title="You asked for a recall">
+            Waiting for {d.maker.fullName} to answer ({formatDateTime(myRequest.requestedAt)}).
           </InlineAlert>
         </div>
       ) : null}
       {t.status === 'RETURNED' && t.returnComment ? (
         <div className="mb-4">
-          <InlineAlert tone="warning" title="Returned for correction">
-            {t.returnComment}
+          <InlineAlert tone="warning" title={recalled ? 'Recalled' : 'Returned for correction'}>
+            {t.returnComment} When it is resubmitted it goes through every level again, starting
+            with the Account Officer.
+          </InlineAlert>
+        </div>
+      ) : null}
+      {pendingApproval && isApprover && !a.approve && a.approveReady ? (
+        <div className="mb-4">
+          <InlineAlert tone="warning" title="Before you approve">
+            <span className="flex flex-wrap items-center justify-between gap-2">
+              <span>{a.approveReady}.</span>
+              {!a.logCallback ? (
+                <Button size="sm" icon={PhoneCall} onClick={() => setDialog('callback')}>
+                  Log call-back
+                </Button>
+              ) : !a.auditVerify ? (
+                <Button size="sm" icon={ShieldCheck} onClick={() => setDialog('auditVerify')}>
+                  Verify signature
+                </Button>
+              ) : null}
+            </span>
+          </InlineAlert>
+        </div>
+      ) : null}
+      {t.status === 'PENDING_OPS_APPROVAL' && prepared ? (
+        <div className="mb-4">
+          <InlineAlert tone="info" title="Posting keyed, awaiting a second officer">
+            {prepared.executedByName} keyed {prepared.cbsPostingRef} at{' '}
+            {formatDateTime(prepared.executedAt)}. A different Operations officer approves it.
           </InlineAlert>
         </div>
       ) : null}
@@ -512,7 +659,7 @@ export function TxnDetailView({ id }: { id: string }) {
         <div className="mb-4">
           <InlineAlert tone="danger" title="Execution failed">
             {d.executions.filter((e) => e.status === 'FAILED').pop()?.failureReason}. Operations
-            will retry.
+            will key it again for a second officer to approve.
           </InlineAlert>
         </div>
       ) : null}
@@ -527,6 +674,7 @@ export function TxnDetailView({ id }: { id: string }) {
         {tab === 'vouchers' ? <Vouchers d={d} /> : null}
         {tab === 'instruction' ? <Instruction d={d} /> : null}
         {tab === 'verification' ? <Verification d={d} /> : null}
+        {tab === 'documents' ? <DocumentsPanel d={d} onChanged={q.reload} /> : null}
         {tab === 'controls' ? (
           <Card>
             <CardBody>
@@ -546,7 +694,7 @@ export function TxnDetailView({ id }: { id: string }) {
         onClose={close}
         title={`Approve ${t.txnRef}`}
         description={
-          level ? `You are signing at level ${level.levelNo} of 5 (${level.label}).` : undefined
+          level ? `You are signing at level ${level.levelNo} of 6 (${level.label}).` : undefined
         }
         actionLabel="Approve & sign"
         withComment
@@ -573,7 +721,7 @@ export function TxnDetailView({ id }: { id: string }) {
         open={dialog === 'return'}
         onClose={close}
         title={`Return ${t.txnRef} to the maker?`}
-        description="The Treasury Officer corrects it and resubmits; approval restarts at Head, Treasury."
+        description="The Treasury Officer corrects it and resubmits; it then goes through every level again, starting with the Account Officer."
         confirmLabel="Return to maker"
         reason={{ label: 'Comment to the maker', placeholder: 'What needs to be corrected?' }}
         onConfirm={async (c) => {
@@ -630,6 +778,36 @@ export function TxnDetailView({ id }: { id: string }) {
         txnId={dialog === 'execute' ? t.id : null}
         open={dialog === 'execute'}
         onClose={close}
+      />
+      <AuditVerifyModal d={d} open={dialog === 'auditVerify'} onClose={close} />
+      <PaperSignatureModal d={d} open={dialog === 'paper'} onClose={close} />
+      <ConfirmDialog
+        open={dialog === 'recall'}
+        onClose={close}
+        title={`Recall ${t.txnRef}?`}
+        description="It comes back to you, editable. When you resubmit it goes through every level again, starting with the Account Officer."
+        confirmLabel="Recall"
+        reason={{ label: 'Reason', placeholder: 'Why are you recalling it?' }}
+        onConfirm={async (r) => {
+          await transactionsService.recall(t.id, r, t.version);
+          toast.success(`${t.txnRef} recalled`, 'It is back with you to edit.');
+        }}
+      />
+      <ConfirmDialog
+        open={dialog === 'requestRecall'}
+        onClose={close}
+        title={`Ask ${d.maker.fullName} to recall ${t.txnRef}?`}
+        description="The Treasury Officer decides whether to bring it back to themselves, send it back to you, or decline."
+        confirmLabel="Request recall"
+        reason={{ label: 'Reason', placeholder: 'Why should it be recalled?' }}
+        onConfirm={async (r) => {
+          await transactionsService.requestRecall(t.id, r);
+          toast.success('Recall requested', `${d.maker.fullName} has been notified.`);
+        }}
+      />
+      <DecideRecallModal
+        request={d.recalls.find((r) => r.id === recallFor) ?? null}
+        onClose={() => setRecallFor(null)}
       />
     </>
   );

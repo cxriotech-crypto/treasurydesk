@@ -34,8 +34,8 @@ import {
   type Fig,
   type MaturityDateResult,
 } from '@/lib/calc';
-import { maxDate, nextBusinessDay } from '@/lib/dates';
-import { formatNaira } from '@/lib/format';
+import { daysBetween, isWeekend, maxDate, nextBusinessDay } from '@/lib/dates';
+import { formatDateWithDay, formatNaira } from '@/lib/format';
 import { ZERO, add, isPositive, toMoney } from '@/lib/money';
 
 export type VoucherDraft = Omit<Voucher, 'id' | 'version' | 'voucherNo' | 'txnId' | 'createdAt'>;
@@ -63,11 +63,27 @@ export interface SummaryLine {
   format: VoucherRowFormat;
 }
 
+/**
+ * A new maturity date that is not a business day. The voucher cannot be signed until the user
+ * moves it, so the screen asks them — suggesting the next business day.
+ */
+export interface MaturityPrompt {
+  field: 'newTenorDays' | 'correctedTenorDays';
+  effectiveDate: string;
+  tenorDays: number;
+  /** Effective date + tenor: a weekend or public holiday. */
+  maturityDate: string;
+  suggestedDate: string;
+  suggestedTenorDays: number;
+  weekend: boolean;
+}
+
 export interface TxnComputation {
   vouchers: VoucherDraft[];
   headlineAmt: string;
   errors: Errors;
   notes: string[];
+  maturityPrompt: MaturityPrompt | null;
   /** Short list of the key figures (dashboards, lists, confirmation dialogs). */
   summary: SummaryLine[];
 }
@@ -240,6 +256,29 @@ export function computeTxn(c: TxnCalcContext, baseEnv: CalcEnv): TxnComputation 
   let headlineAmt = ZERO;
   const summary: SummaryLine[] = [];
   const types = SCENARIO_META[s].vouchers;
+  let maturityPrompt: MaturityPrompt | null = null;
+  /** A new maturity must land on a business day: flag it and work out the suggestion. */
+  const checkMaturity = (
+    m: MaturityDateResult,
+    effectiveDate: string,
+    tenorDays: number,
+    field: MaturityPrompt['field']
+  ) => {
+    if (!m.adjusted || !Number.isFinite(tenorDays)) return;
+    const weekend = isWeekend(m.unadjusted);
+    maturityPrompt = {
+      field,
+      effectiveDate,
+      tenorDays,
+      maturityDate: m.unadjusted,
+      suggestedDate: m.date,
+      suggestedTenorDays: tenorDays + daysBetween(m.unadjusted, m.date),
+      weekend,
+    };
+    if (!errors[field])
+      errors[field] =
+        `Matures on ${formatDateWithDay(m.unadjusted)}, ${weekend ? 'a weekend' : 'a public holiday'}. Move it to a business day.`;
+  };
 
   switch (s) {
     case 'INFLOW': {
@@ -255,7 +294,7 @@ export function computeTxn(c: TxnCalcContext, baseEnv: CalcEnv): TxnComputation 
         env
       );
       Object.assign(errors, r.errors);
-      if (r.maturity.adjusted) notes.push(r.maturity.reason!);
+      checkMaturity(r.maturity, eff, i.newTenorDays ?? NaN, 'newTenorDays');
       const v = blankVoucher('FI', 1, eff);
       Object.assign(v, {
         principalAmt: r.principal.value,
@@ -405,6 +444,7 @@ export function computeTxn(c: TxnCalcContext, baseEnv: CalcEnv): TxnComputation 
           total('Total payout', r.totalPayout),
         ],
       });
+      checkMaturity(r.newMaturity, liq, r.newTenorDays, 'newTenorDays');
       const ro = blankVoucher('RO', 2, liq);
       Object.assign(ro, {
         principalAmt: r.remaining.value,
@@ -503,7 +543,7 @@ export function computeTxn(c: TxnCalcContext, baseEnv: CalcEnv): TxnComputation 
         env
       );
       Object.assign(errors, r.errors);
-      if (r.newMaturity.adjusted) notes.push(r.newMaturity.reason!);
+      checkMaturity(r.newMaturity, newEff, r.newTenorDays, 'newTenorDays');
       const ro = blankVoucher('RO', letter === 'D' ? 2 : 1, newEff);
       Object.assign(ro, {
         principalAmt: r.principal.value,
@@ -660,7 +700,7 @@ export function computeTxn(c: TxnCalcContext, baseEnv: CalcEnv): TxnComputation 
         );
         if (inf.errors.newRate) errors.newRate = inf.errors.newRate;
         if (inf.errors.newTenorDays) errors.newTenorDays = inf.errors.newTenorDays;
-        if (inf.maturity.adjusted) notes.push(inf.maturity.reason!);
+        checkMaturity(inf.maturity, date, i.newTenorDays ?? NaN, 'newTenorDays');
         Object.assign(v, {
           effectiveDate: date,
           newRate: i.newRate ?? null,
@@ -727,7 +767,12 @@ export function computeTxn(c: TxnCalcContext, baseEnv: CalcEnv): TxnComputation 
       ) {
         errors.correctedAmount = `Increase of ${formatNaira(r.deltaAmount.value)} exceeds the PA available balance ${formatNaira(c.customerPa.availableBal)}`;
       }
-      if (r.corrected.maturity.adjusted) notes.push(r.corrected.maturity.reason!);
+      checkMaturity(
+        r.corrected.maturity,
+        orig.effectiveDate,
+        r.corrected.tenorDays,
+        'correctedTenorDays'
+      );
       const v = blankVoucher('TS', 1, date);
       Object.assign(v, {
         principalAmt: r.original.amount,
@@ -797,7 +842,7 @@ export function computeTxn(c: TxnCalcContext, baseEnv: CalcEnv): TxnComputation 
   if (chargeOff && !i.preliqChargeOffReason?.trim())
     errors.preliqChargeOffReason = 'Give a reason for not applying the pre-liquidation charge';
 
-  return { vouchers, headlineAmt, errors, notes, summary };
+  return { vouchers, headlineAmt, errors, notes, summary, maturityPrompt };
 }
 
 export function scenarioHasPayout(s: ScenarioCode): boolean {

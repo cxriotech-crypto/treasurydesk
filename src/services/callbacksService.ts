@@ -1,4 +1,4 @@
-import type { CallbackLog, ListQuery, ListResult } from '@/domain/types';
+import type { CallbackLog, ListQuery, ListResult, TreasuryTxn } from '@/domain/types';
 import type { CallbackOutcome } from '@/domain/codes';
 import { nowIso } from '@/lib/dates';
 import { getDb } from '@/data/store';
@@ -74,12 +74,9 @@ export const mockCallbacksService: CallbacksService = {
     run(() => {
       requireUser();
       const db = getDb();
-      return filterTxns(db, { status: ['VERIFICATION', 'RETURNED'] }, nowIso())
-        .filter((t) => {
-          const ctl = (code: string) =>
-            db.controls.find((c) => c.txnId === t.id && c.controlCode === code)?.state;
-          return ctl('C02') === 'PASSED' && ctl('C03') !== 'PASSED';
-        })
+      // Submitted transactions waiting on the Account Officer's call.
+      return filterTxns(db, { status: ['PENDING_ACCOUNT_OFFICER'] }, nowIso())
+        .filter((t) => wf.currentCall(db, t as TreasuryTxn)?.outcome !== 'CONFIRMED')
         .map((t) => {
           const logs = db.callbacks
             .filter((c) => c.txnId === t.id)

@@ -21,11 +21,13 @@ export const TXN_STATUSES = [
   'DRAFT',
   'VERIFICATION',
   'STOPPED',
+  'PENDING_ACCOUNT_OFFICER',
   'PENDING_HEAD_TREASURY',
   'PENDING_MIS',
   'PENDING_AUDIT',
   'PENDING_MD',
   'PENDING_OPERATIONS',
+  'PENDING_OPS_APPROVAL',
   'EXEC_FAILED',
   'EXECUTED',
   'COMPLETED',
@@ -40,13 +42,23 @@ export type Tone = 'neutral' | 'info' | 'danger' | 'warning' | 'accent' | 'succe
 export const TXN_STATUS_META: Record<TxnStatus, { label: string; owner: RoleCode[]; tone: Tone }> =
   {
     DRAFT: { label: 'Draft', owner: ['TO'], tone: 'neutral' },
-    VERIFICATION: { label: 'In verification', owner: ['TO', 'AO'], tone: 'info' },
+    VERIFICATION: { label: 'In preparation', owner: ['TO'], tone: 'info' },
     STOPPED: { label: 'Stopped – signature mismatch', owner: ['TO'], tone: 'danger' },
+    PENDING_ACCOUNT_OFFICER: {
+      label: 'Awaiting Account Officer',
+      owner: ['AO'],
+      tone: 'warning',
+    },
     PENDING_HEAD_TREASURY: { label: 'Awaiting Head Treasury', owner: ['HT'], tone: 'warning' },
     PENDING_MIS: { label: 'Awaiting MIS', owner: ['MIS'], tone: 'warning' },
     PENDING_AUDIT: { label: 'Awaiting Audit', owner: ['AUD'], tone: 'warning' },
     PENDING_MD: { label: 'Awaiting MD', owner: ['MD'], tone: 'warning' },
     PENDING_OPERATIONS: { label: 'Ready for Operations', owner: ['OPS'], tone: 'accent' },
+    PENDING_OPS_APPROVAL: {
+      label: 'Awaiting Operations approval',
+      owner: ['OPS'],
+      tone: 'accent',
+    },
     EXEC_FAILED: { label: 'Execution failed', owner: ['OPS'], tone: 'danger' },
     EXECUTED: { label: 'Executed – awaiting confirmation', owner: ['TO'], tone: 'info' },
     COMPLETED: { label: 'Completed', owner: [], tone: 'success' },
@@ -58,11 +70,13 @@ export const TXN_STATUS_META: Record<TxnStatus, { label: string; owner: RoleCode
 export const OPEN_STATUSES: TxnStatus[] = [
   'DRAFT',
   'VERIFICATION',
+  'PENDING_ACCOUNT_OFFICER',
   'PENDING_HEAD_TREASURY',
   'PENDING_MIS',
   'PENDING_AUDIT',
   'PENDING_MD',
   'PENDING_OPERATIONS',
+  'PENDING_OPS_APPROVAL',
   'EXEC_FAILED',
   'EXECUTED',
   'RETURNED',
@@ -70,26 +84,37 @@ export const OPEN_STATUSES: TxnStatus[] = [
 
 export const CLOSED_STATUSES: TxnStatus[] = ['COMPLETED', 'REJECTED', 'CANCELLED', 'STOPPED'];
 
-/** Approval levels. Level 1 is the maker's own signature (TO). */
+/**
+ * Approval levels. Level 1 is the maker's own signature (TO). Level 2 is the customer's Account
+ * Officer, who calls the customer and checks the transaction (maker-checker) before it goes on to
+ * Head of Treasury; their control is the telephone confirmation (C03).
+ */
 export const APPROVAL_LEVELS = [
   { levelNo: 1, roleCode: 'TO', label: 'Treasury Officer', pendingStatus: null, control: 'C06' },
   {
     levelNo: 2,
+    roleCode: 'AO',
+    label: 'Account Officer',
+    pendingStatus: 'PENDING_ACCOUNT_OFFICER',
+    control: 'C03',
+  },
+  {
+    levelNo: 3,
     roleCode: 'HT',
     label: 'Head, Treasury',
     pendingStatus: 'PENDING_HEAD_TREASURY',
     control: 'C07',
   },
-  { levelNo: 3, roleCode: 'MIS', label: 'MIS', pendingStatus: 'PENDING_MIS', control: 'C08' },
+  { levelNo: 4, roleCode: 'MIS', label: 'MIS', pendingStatus: 'PENDING_MIS', control: 'C08' },
   {
-    levelNo: 4,
+    levelNo: 5,
     roleCode: 'AUD',
     label: 'Internal Audit',
     pendingStatus: 'PENDING_AUDIT',
     control: 'C09',
   },
   {
-    levelNo: 5,
+    levelNo: 6,
     roleCode: 'MD',
     label: 'Managing Director',
     pendingStatus: 'PENDING_MD',
@@ -103,9 +128,10 @@ export const APPROVAL_LEVELS = [
   control: string;
 }>;
 
-export type ApprovalLevelNo = 1 | 2 | 3 | 4 | 5;
+export type ApprovalLevelNo = 1 | 2 | 3 | 4 | 5 | 6;
 
 export const PENDING_APPROVAL_STATUSES: TxnStatus[] = [
+  'PENDING_ACCOUNT_OFFICER',
   'PENDING_HEAD_TREASURY',
   'PENDING_MIS',
   'PENDING_AUDIT',
@@ -114,6 +140,22 @@ export const PENDING_APPROVAL_STATUSES: TxnStatus[] = [
 
 export function levelForStatus(status: TxnStatus): (typeof APPROVAL_LEVELS)[number] | undefined {
   return APPROVAL_LEVELS.find((l) => l.pendingStatus === status);
+}
+
+/** Statuses from which the maker can still recall: submitted, not yet executed. */
+export const RECALLABLE_STATUSES: TxnStatus[] = [
+  ...PENDING_APPROVAL_STATUSES,
+  'PENDING_OPERATIONS',
+  'PENDING_OPS_APPROVAL',
+  'EXEC_FAILED',
+];
+
+/** Where a transaction sits in the chain: 2..6 = approval level, 7 = Operations. 0 = not in it. */
+export function chainPosition(status: TxnStatus): number {
+  const level = levelForStatus(status);
+  if (level) return level.levelNo;
+  if (['PENDING_OPERATIONS', 'PENDING_OPS_APPROVAL', 'EXEC_FAILED'].includes(status)) return 7;
+  return 0;
 }
 
 export function levelForRole(role: RoleCode): (typeof APPROVAL_LEVELS)[number] | undefined {
@@ -417,7 +459,9 @@ export const CALLBACK_OUTCOME_LABELS: Record<CallbackOutcome, string> = {
   UNREACHABLE: 'Unreachable',
   DISPUTED: 'Disputed',
 };
-export type ApprovalAction = 'APPROVE' | 'RETURN' | 'REJECT';
-export type ExecutionStatus = 'SUCCESS' | 'FAILED';
+export type ApprovalAction = 'APPROVE' | 'RETURN' | 'REJECT' | 'RECALL';
+export type ApprovalChannel = 'APP' | 'PAPER';
+/** PREPARED = keyed by one Operations officer, awaiting a second to approve. */
+export type ExecutionStatus = 'PREPARED' | 'SUCCESS' | 'FAILED' | 'RETURNED';
 export type AnnivFreq = 0 | 30 | 60 | 90;
 export type VoucherRowKind = 'input' | 'calc' | 'info' | 'total';

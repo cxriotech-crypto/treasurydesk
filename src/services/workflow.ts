@@ -8,6 +8,9 @@
 import type {
   Account,
   AppUser,
+  Approval,
+  Attachment,
+  AttachmentKind,
   CallbackLog,
   ImportBatch,
   ImportRegister,
@@ -15,17 +18,26 @@ import type {
   Ctx,
   Instruction,
   Investment,
+  RecallDecision,
+  RecallRequest,
   TreasuryTxn,
+  TxnBatch,
   TxnComment,
   TxnInput,
   Voucher,
 } from '@/domain/types';
 import {
   APPROVAL_LEVELS,
+  CLOSED_STATUSES,
   CONTROL_CODES,
+  CONTROL_LABELS,
+  RECALLABLE_STATUSES,
+  ROLE_LABELS,
   SCENARIO_META,
   TXN_STATUS_META,
   type AnnivFreq,
+  chainPosition,
+  levelForRole,
   levelForStatus,
   scenarioLabel,
   type ControlCode,
@@ -56,6 +68,9 @@ import { getDb, mutate } from '@/data/store';
 import { computeTxn, type TxnCalcContext, type TxnComputation } from './voucherBuilder';
 
 export const SYSTEM_USER_ID = 'SYSTEM';
+
+/** Subject, instruction, signature, Eazybankz, voucher. The call-back follows submission. */
+export const WIZARD_STEPS = 5;
 
 export const EDITABLE_STATUSES: TxnStatus[] = ['DRAFT', 'VERIFICATION', 'RETURNED'];
 export const LOCKING_STATUSES: TxnStatus[] = [
@@ -341,6 +356,7 @@ export function createDraft(ctx: Ctx, a: CreateDraftArgs): TreasuryTxn {
       reversalOfTxnId: a.reversalOfTxnId ?? null,
       reversedByTxnId: null,
       resultInvestmentId: null,
+      batchId: null,
       status: 'DRAFT',
       wizardStep: 1,
       makerId: u.id,
@@ -372,6 +388,9 @@ export function createDraft(ctx: Ctx, a: CreateDraftArgs): TreasuryTxn {
       sourceConfirmed: false,
       verifiedBy: null,
       verifiedAt: null,
+      auditVerifiedBy: null,
+      auditVerifiedAt: null,
+      auditCycleNo: null,
     });
     for (const code of CONTROL_CODES) {
       insert(db, 'controls', {
@@ -430,7 +449,7 @@ export function updateDraft(
     }
     if (a.input) patch.input = { ...a.input };
     if (a.wizardStep !== undefined)
-      patch.wizardStep = Math.max(t.wizardStep, Math.min(6, a.wizardStep));
+      patch.wizardStep = Math.max(t.wizardStep, Math.min(WIZARD_STEPS, a.wizardStep));
     const preview = { ...t, ...patch } as TreasuryTxn;
     patch.headlineAmt = safeHeadline(db, preview, today(ctx));
     patchTxn(db, ctx, t, patch, 'UPDATE', 'draft saved');
@@ -438,7 +457,66 @@ export function updateDraft(
   });
 }
 
-export type InstructionData = Omit<Instruction, 'id' | 'version' | 'txnId'>;
+export type InstructionData = Omit<Instruction, 'id' | 'version' | 'txnId'> & {
+  /** The full list of instruction documents after this save (existing ones keep their id). */
+  documents?: AttachmentInput[];
+};
+
+/** A file to attach: `id` set for one already attached, omitted for a new upload. */
+export interface AttachmentInput {
+  id?: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  dataUrl: string | null;
+}
+
+export const MAX_ATTACHMENT_BYTES = 1024 * 1024;
+export const MAX_ATTACHMENTS = 10;
+const ATTACHMENT_TYPES = ['application/pdf', 'image/png', 'image/jpeg'];
+
+function checkAttachments(files: AttachmentInput[], required: boolean): void {
+  if (required && !files.length)
+    throw new AppError('Attach at least one document.', 'VALIDATION', {
+      documents: 'At least one document is required',
+    });
+  if (files.length > MAX_ATTACHMENTS)
+    throw new AppError(`Attach at most ${MAX_ATTACHMENTS} documents.`, 'VALIDATION', {
+      documents: `At most ${MAX_ATTACHMENTS} documents`,
+    });
+  for (const f of files) {
+    if (f.id) continue;
+    if (!ATTACHMENT_TYPES.includes(f.mimeType))
+      throw new AppError(`${f.fileName}: use a PDF, PNG or JPEG.`, 'VALIDATION', {
+        documents: 'PDF, PNG or JPEG only',
+      });
+    if (f.sizeBytes > MAX_ATTACHMENT_BYTES)
+      throw new AppError(`${f.fileName} is larger than 1 MB.`, 'VALIDATION', {
+        documents: 'Each file must be 1 MB or smaller',
+      });
+  }
+}
+
+function insertAttachment(
+  db: Db,
+  ctx: Ctx,
+  t: TreasuryTxn,
+  kind: AttachmentKind,
+  f: AttachmentInput,
+  approvalId: string | null = null
+) {
+  return insert(db, 'attachments', {
+    txnId: t.id,
+    kind,
+    approvalId,
+    fileName: f.fileName,
+    mimeType: f.mimeType,
+    sizeBytes: f.sizeBytes,
+    dataUrl: f.dataUrl,
+    uploadedBy: ctx.userId,
+    uploadedAt: ctx.at,
+  });
+}
 
 export function recordInstruction(ctx: Ctx, txnId: string, data: InstructionData): TreasuryTxn {
   return mutate((db) => {
@@ -447,7 +525,9 @@ export function recordInstruction(ctx: Ctx, txnId: string, data: InstructionData
     requireMaker(t, u);
     requireStatus(t, EDITABLE_STATUSES);
     const errors: Record<string, string> = {};
-    const d: InstructionData = { ...data };
+    const { documents, ...rest } = data;
+    const d: Omit<Instruction, 'id' | 'version' | 'txnId'> = { ...rest };
+    if (documents) checkAttachments(documents, false);
     if (t.scenarioCode === 'THIRD_PARTY_EXT') d.payDestination = 'EXTERNAL';
     if (t.scenarioCode === 'THIRD_PARTY_INT') d.payDestination = 'INTERNAL';
     if (!SCENARIO_META[t.scenarioCode].vouchers.includes('FO')) d.payDestination = 'INTERNAL';
@@ -510,6 +590,22 @@ export function recordInstruction(ctx: Ctx, txnId: string, data: InstructionData
         summary: `${t.txnRef}: instruction recorded (${d.channel.toLowerCase()})`,
         after: { ...d },
       });
+    }
+    if (documents) {
+      // Keep the files still listed, drop the ones removed, add the new uploads.
+      const keep = new Set(documents.filter((f) => f.id).map((f) => f.id));
+      const current = db.attachments.filter((a) => a.txnId === t.id && a.kind === 'INSTRUCTION');
+      for (const a of current) if (!keep.has(a.id)) remove(db, 'attachments', a.id);
+      const added = documents.filter((f) => !f.id);
+      for (const f of added) insertAttachment(db, ctx, t, 'INSTRUCTION', f);
+      if (added.length || current.length !== keep.size)
+        writeAudit(db, ctx, {
+          entity: 'Attachment',
+          entityId: t.id,
+          action: 'INSTRUCTION_DOCUMENTS',
+          summary: `${t.txnRef}: ${documents.length} instruction document(s) on file`,
+          after: { files: documents.map((f) => f.fileName) },
+        });
     }
     setControl(db, ctx, t.id, 'C01', 'PASSED', `Received ${d.receivedDate} ${d.receivedTime}`);
     const env = envOf(db);
@@ -576,14 +672,6 @@ export function verifySignature(ctx: Ctx, txnId: string, checks: SignatureChecks
       'STEP',
       'signature step completed'
     );
-    // The customer call-back is the Account Officer's step — tell them it is waiting.
-    const customer = getById(db, 'customers', t.customerId, 'customer');
-    notify(db, ctx, {
-      targetUserId: customer.accountOfficerId,
-      title: `Call-back due: ${t.txnRef}`,
-      body: `Call ${customer.customerName} on ${customer.regPhone} to confirm the instruction.`,
-      link: link(t),
-    });
     return t;
   });
 }
@@ -628,8 +716,7 @@ export function logCallback(ctx: Ctx, txnId: string, data: CallbackData): Callba
     // SOP step 3: the Account Officer calls the customer on the registered number.
     const u = actor(db, ctx, ['AO']);
     const t = txnOf(db, txnId);
-    requireStatus(t, ['VERIFICATION', 'RETURNED']);
-    requireControls(db, t.id, ['C02']);
+    requireStatus(t, ['PENDING_ACCOUNT_OFFICER']);
     const customer = getById(db, 'customers', t.customerId, 'customer');
     if (customer.accountOfficerId !== u.id) {
       throw new AppError(
@@ -675,22 +762,15 @@ export function logCallback(ctx: Ctx, txnId: string, data: CallbackData): Callba
       summary: `${t.txnRef}: call-back to ${data.phoneCalled} – ${data.outcome.toLowerCase()}`,
       after: { ...data },
     });
+    // The control passes when the Account Officer approves; the call itself is what they check.
     if (data.outcome === 'CONFIRMED') {
       setControl(
         db,
         ctx,
         t.id,
         'C03',
-        'PASSED',
-        `Confirmed by ${officer.fullName} on ${data.callDate} ${data.callTime}`
-      );
-      patchTxn(
-        db,
-        ctx,
-        t,
-        { wizardStep: Math.max(t.wizardStep, 5) },
-        'STEP',
-        'customer call-back confirmed'
+        'PENDING',
+        `Customer confirmed on ${data.callDate} ${data.callTime}; awaiting ${officer.fullName}'s approval`
       );
     } else {
       setControl(
@@ -761,7 +841,7 @@ export function confirmCbs(ctx: Ctx, txnId: string, data: CbsConfirmation): Trea
       db,
       ctx,
       t,
-      { wizardStep: Math.max(t.wizardStep, 6) },
+      { wizardStep: Math.max(t.wizardStep, WIZARD_STEPS) },
       'STEP',
       'Eazybankz verification completed'
     );
@@ -786,6 +866,115 @@ function voucherNo(db: Db, type: Voucher['voucherType'], year: number): string {
   return `${type}-${year}-${String(nextCounter(db, `voucher:${type}:${year}`)).padStart(5, '0')}`;
 }
 
+type NewApproval = Omit<Approval, 'id' | 'version' | 'channel' | 'recordedBy' | 'superseded'> &
+  Partial<Pick<Approval, 'channel' | 'recordedBy'>>;
+
+function addApproval(db: Db, a: NewApproval): Approval {
+  return insert(db, 'approvals', {
+    channel: 'APP',
+    recordedBy: null,
+    superseded: false,
+    ...a,
+  });
+}
+
+/** Signatures that still count in the current cycle. */
+function liveApprovals(db: Db, t: TreasuryTxn): Approval[] {
+  return db.approvals.filter((a) => a.txnId === t.id && a.cycleNo === t.cycleNo && !a.superseded);
+}
+
+/** Approval controls, cleared when a transaction starts the chain again. */
+const CHAIN_CONTROLS: ControlCode[] = ['C03', 'C06', 'C07', 'C08', 'C09', 'C10'];
+
+/** Everything signAndSubmit checks before signing, without writing anything. */
+export function submitBlocker(db: Db, t: TreasuryTxn, asOf: string): string | null {
+  if (!['VERIFICATION', 'RETURNED'].includes(t.status)) return 'Not ready to submit';
+  const missing = (['C01', 'C02', 'C04'] as ControlCode[]).filter(
+    (c) => controlOf(db, t.id, c).state !== 'PASSED'
+  );
+  if (missing.length)
+    return `Complete ${missing.map((c) => CONTROL_LABELS[c].toLowerCase()).join(', ')} first`;
+  const comp = computeFor(db, t, asOf);
+  if (Object.keys(comp.errors).length) return 'The voucher has errors';
+  return null;
+}
+
+/** The body of a submission; `sign` is checked by the caller. */
+function submitOne(
+  db: Db,
+  ctx: Ctx,
+  u: AppUser,
+  t: TreasuryTxn,
+  sign: SignArgs,
+  batchId: string | null
+): TreasuryTxn {
+  requireMaker(t, u);
+  requireStatus(t, ['VERIFICATION', 'RETURNED']);
+  requireControls(db, t.id, ['C01', 'C02', 'C04']);
+  const comp = computeFor(db, t, today(ctx));
+  if (Object.keys(comp.errors).length) {
+    throw new AppError(
+      'The voucher has errors. Correct them before signing.',
+      'VALIDATION',
+      comp.errors
+    );
+  }
+  const resubmission = t.status === 'RETURNED';
+  const cycleNo = resubmission ? t.cycleNo + 1 : t.cycleNo;
+  // A resubmission goes through every level again, from the Account Officer.
+  if (resubmission) for (const code of CHAIN_CONTROLS) setControl(db, ctx, t.id, code, 'PENDING');
+  // Replace vouchers, keeping numbers already issued for the same slot.
+  const old = db.vouchers.filter((v) => v.txnId === t.id);
+  const year = yearOf(today(ctx));
+  for (const v of old) remove(db, 'vouchers', v.id);
+  const issued = comp.vouchers.map((draft) => {
+    const prev = old.find((o) => o.seqNo === draft.seqNo && o.voucherType === draft.voucherType);
+    return insert(db, 'vouchers', {
+      ...draft,
+      txnId: t.id,
+      voucherNo: prev?.voucherNo ?? voucherNo(db, draft.voucherType, year),
+      createdAt: ctx.at,
+    });
+  });
+  setControl(db, ctx, t.id, 'C05', 'PASSED', issued.map((v) => v.voucherNo).join(' + '));
+  setControl(db, ctx, t.id, 'C06', 'PASSED', `Signed by ${u.fullName}`);
+  addApproval(db, {
+    txnId: t.id,
+    cycleNo,
+    levelNo: 1,
+    roleCode: 'TO',
+    userId: u.id,
+    action: 'APPROVE',
+    // Only what the maker wrote: an empty note is not a note.
+    comments: sign.comments?.trim() ?? '',
+    actedAt: ctx.at,
+  });
+  patchTxn(
+    db,
+    ctx,
+    t,
+    {
+      status: 'PENDING_ACCOUNT_OFFICER',
+      cycleNo,
+      submittedAt: ctx.at,
+      headlineAmt: comp.headlineAmt,
+      wizardStep: WIZARD_STEPS,
+      returnComment: resubmission ? t.returnComment : null,
+      batchId,
+    },
+    resubmission ? 'RESUBMIT' : 'SUBMIT',
+    `${resubmission ? 'resubmitted' : 'signed and submitted'} with ${issued.map((v) => v.voucherNo).join(', ')}`
+  );
+  const customer = getById(db, 'customers', t.customerId, 'customer');
+  notify(db, ctx, {
+    targetUserId: customer.accountOfficerId,
+    title: `Call and check: ${t.txnRef}`,
+    body: `Call ${customer.customerName} on ${customer.regPhone}, then approve, return or reject. ${scenarioLabel(t.scenarioCode)} · ${formatNaira(t.headlineAmt)}`,
+    link: link(t),
+  });
+  return getById(db, 'txns', t.id, 'transaction');
+}
+
 export function signAndSubmit(
   ctx: Ctx,
   txnId: string,
@@ -796,76 +985,15 @@ export function signAndSubmit(
     const u = actor(db, ctx, ['TO']);
     const t = txnOf(db, txnId, version);
     requireMaker(t, u);
-    requireStatus(t, ['VERIFICATION', 'RETURNED']);
-    // C03 (customer call-back) is recorded but does not block: see CHANGES.md.
-    requireControls(db, t.id, ['C01', 'C02', 'C04']);
     checkSignature(u, sign);
-    const comp = computeFor(db, t, today(ctx));
-    if (Object.keys(comp.errors).length) {
-      throw new AppError(
-        'The voucher has errors. Correct them before signing.',
-        'VALIDATION',
-        comp.errors
-      );
-    }
-    const resubmission = t.status === 'RETURNED';
-    const cycleNo = resubmission ? t.cycleNo + 1 : t.cycleNo;
-    if (resubmission) {
-      for (const code of ['C06', 'C07', 'C08', 'C09', 'C10'] as ControlCode[])
-        setControl(db, ctx, t.id, code, 'PENDING');
-    }
-    // Replace vouchers, keeping numbers already issued for the same slot.
-    const old = db.vouchers.filter((v) => v.txnId === t.id);
-    const year = yearOf(today(ctx));
-    for (const v of old) remove(db, 'vouchers', v.id);
-    const issued = comp.vouchers.map((draft) => {
-      const prev = old.find((o) => o.seqNo === draft.seqNo && o.voucherType === draft.voucherType);
-      return insert(db, 'vouchers', {
-        ...draft,
-        txnId: t.id,
-        voucherNo: prev?.voucherNo ?? voucherNo(db, draft.voucherType, year),
-        createdAt: ctx.at,
-      });
-    });
-    setControl(db, ctx, t.id, 'C05', 'PASSED', issued.map((v) => v.voucherNo).join(' + '));
-    setControl(db, ctx, t.id, 'C06', 'PASSED', `Signed by ${u.fullName}`);
-    insert(db, 'approvals', {
-      txnId: t.id,
-      cycleNo,
-      levelNo: 1,
-      roleCode: 'TO',
-      userId: u.id,
-      action: 'APPROVE',
-      comments:
-        sign.comments?.trim() || (resubmission ? 'Corrected and resubmitted' : 'Raised and signed'),
-      actedAt: ctx.at,
-    });
-    patchTxn(
-      db,
-      ctx,
-      t,
-      {
-        status: 'PENDING_HEAD_TREASURY',
-        cycleNo,
-        submittedAt: ctx.at,
-        headlineAmt: comp.headlineAmt,
-        wizardStep: 6,
-      },
-      resubmission ? 'RESUBMIT' : 'SUBMIT',
-      `${resubmission ? 'resubmitted' : 'signed and submitted'} with ${issued.map((v) => v.voucherNo).join(', ')}`
-    );
-    notify(db, ctx, {
-      targetRole: 'HT',
-      title: `Approval needed: ${t.txnRef}`,
-      body: `${scenarioLabel(t.scenarioCode)} · ${formatNaira(t.headlineAmt)} from ${u.fullName}`,
-      link: link(t),
-    });
-    return t;
+    return submitOne(db, ctx, u, t, sign, null);
   });
 }
 
 function nextStatusAfter(status: TxnStatus): TxnStatus {
   switch (status) {
+    case 'PENDING_ACCOUNT_OFFICER':
+      return 'PENDING_HEAD_TREASURY';
     case 'PENDING_HEAD_TREASURY':
       return 'PENDING_MIS';
     case 'PENDING_MIS':
@@ -885,10 +1013,34 @@ export function approvalBlocker(db: Db, t: TreasuryTxn, u: AppUser): string | nu
   if (!level) return 'Not awaiting approval';
   if (u.roleCode !== level.roleCode) return `Awaiting ${level.label}`;
   if (t.makerId === u.id) return 'Maker-checker: you created this transaction';
-  const signed = db.approvals.some(
-    (a) => a.txnId === t.id && a.cycleNo === t.cycleNo && a.userId === u.id
-  );
-  if (signed) return 'You have already signed this transaction';
+  if (level.roleCode === 'AO') {
+    const c = findById(db, 'customers', t.customerId);
+    if (c?.accountOfficerId !== u.id) return "Awaiting the customer's own Account Officer";
+  }
+  if (liveApprovals(db, t).some((a) => a.userId === u.id && a.action === 'APPROVE'))
+    return 'You have already signed this transaction';
+  return null;
+}
+
+/** The latest call-back logged since this cycle was submitted. */
+export function currentCall(db: Db, t: TreasuryTxn): CallbackLog | undefined {
+  return db.callbacks
+    .filter((c) => c.txnId === t.id && (!t.submittedAt || c.createdAt >= t.submittedAt))
+    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))[0];
+}
+
+/** Audit has verified the signature in this cycle. */
+export function auditVerified(db: Db, t: TreasuryTxn): boolean {
+  const v = db.verifications.find((x) => x.txnId === t.id);
+  return !!v?.auditVerifiedBy && v.auditCycleNo === t.cycleNo;
+}
+
+/** What still has to happen before this level can approve (null = ready). */
+export function approveRequirement(db: Db, t: TreasuryTxn): string | null {
+  const level = levelForStatus(t.status);
+  if (level?.roleCode === 'AO' && currentCall(db, t)?.outcome !== 'CONFIRMED')
+    return 'Log a confirmed call with the customer first';
+  if (level?.roleCode === 'AUD' && !auditVerified(db, t)) return 'Verify the signature first';
   return null;
 }
 
@@ -899,56 +1051,82 @@ function approvalActor(db: Db, ctx: Ctx, t: TreasuryTxn) {
   return { u, level: levelForStatus(t.status)! };
 }
 
+/** Record one level's signature and move the transaction to the next. */
+function advance(
+  db: Db,
+  ctx: Ctx,
+  t: TreasuryTxn,
+  signer: AppUser,
+  level: (typeof APPROVAL_LEVELS)[number],
+  comments: string,
+  paper: { recordedBy: AppUser } | null
+): Approval {
+  const ap = addApproval(db, {
+    txnId: t.id,
+    cycleNo: t.cycleNo,
+    levelNo: level.levelNo,
+    roleCode: level.roleCode,
+    userId: signer.id,
+    action: 'APPROVE',
+    comments,
+    actedAt: ctx.at,
+    channel: paper ? 'PAPER' : 'APP',
+    recordedBy: paper?.recordedBy.id ?? null,
+  });
+  const how = paper
+    ? `Signed on paper by ${signer.fullName} (uploaded by ${paper.recordedBy.fullName})`
+    : `Signed by ${signer.fullName}`;
+  const call = currentCall(db, t);
+  const note =
+    level.roleCode === 'AO' && call && !paper
+      ? `Customer confirmed on ${call.callDate} ${call.callTime}; ${how.toLowerCase()}`
+      : how;
+  setControl(db, ctx, t.id, level.control as ControlCode, 'PASSED', note);
+  const next = nextStatusAfter(t.status);
+  patchTxn(
+    db,
+    ctx,
+    t,
+    { status: next },
+    paper ? 'APPROVE_PAPER' : 'APPROVE',
+    `approved at level ${level.levelNo} (${level.label})${paper ? ' on paper' : ''}`
+  );
+  if (next === 'PENDING_OPERATIONS') {
+    notify(db, ctx, {
+      targetRole: 'OPS',
+      title: `Ready to execute: ${t.txnRef}`,
+      body: `${scenarioLabel(t.scenarioCode)} · ${formatNaira(t.headlineAmt)} fully approved`,
+      link: link(t),
+    });
+    notify(db, ctx, {
+      targetUserId: t.makerId,
+      title: `Fully approved: ${t.txnRef}`,
+      body: 'Every signature is in. Operations have been notified.',
+      link: link(t),
+    });
+  } else {
+    const nextLevel = levelForStatus(next)!;
+    const c = comments.trim();
+    notify(db, ctx, {
+      targetRole: nextLevel.roleCode,
+      title: `Approval needed: ${t.txnRef}`,
+      body: c
+        ? `${scenarioLabel(t.scenarioCode)} · ${formatNaira(t.headlineAmt)}. ${signer.fullName}, ${level.label}: ${c}`
+        : `${scenarioLabel(t.scenarioCode)} · ${formatNaira(t.headlineAmt)} approved by ${signer.fullName}`,
+      link: link(t),
+    });
+  }
+  return ap;
+}
+
 export function approve(ctx: Ctx, txnId: string, sign: SignArgs, version?: number): TreasuryTxn {
   return mutate((db) => {
     const t = txnOf(db, txnId, version);
     const { u, level } = approvalActor(db, ctx, t);
+    const need = approveRequirement(db, t);
+    if (need) throw new AppError(`${need}.`, 'STATE');
     checkSignature(u, sign);
-    insert(db, 'approvals', {
-      txnId: t.id,
-      cycleNo: t.cycleNo,
-      levelNo: level.levelNo,
-      roleCode: level.roleCode,
-      userId: u.id,
-      action: 'APPROVE',
-      comments: sign.comments?.trim() ?? '',
-      actedAt: ctx.at,
-    });
-    setControl(db, ctx, t.id, level.control as ControlCode, 'PASSED', `Signed by ${u.fullName}`);
-    const next = nextStatusAfter(t.status);
-    patchTxn(
-      db,
-      ctx,
-      t,
-      { status: next },
-      'APPROVE',
-      `approved at level ${level.levelNo} (${level.label})`
-    );
-    if (next === 'PENDING_OPERATIONS') {
-      notify(db, ctx, {
-        targetRole: 'OPS',
-        title: `Ready to execute: ${t.txnRef}`,
-        body: `${scenarioLabel(t.scenarioCode)} · ${formatNaira(t.headlineAmt)} fully approved`,
-        link: link(t),
-      });
-      notify(db, ctx, {
-        targetUserId: t.makerId,
-        title: `Fully approved: ${t.txnRef}`,
-        body: 'All five signatures are in. Operations have been notified.',
-        link: link(t),
-      });
-    } else {
-      const nextLevel = levelForStatus(next)!;
-      const note = sign.comments?.trim();
-      notify(db, ctx, {
-        targetRole: nextLevel.roleCode,
-        title: `Approval needed: ${t.txnRef}`,
-        body: note
-          ? `${scenarioLabel(t.scenarioCode)} · ${formatNaira(t.headlineAmt)}. ${u.fullName}, ${level.label}: ${note}`
-          : `${scenarioLabel(t.scenarioCode)} · ${formatNaira(t.headlineAmt)} approved by ${u.fullName}`,
-        link: link(t),
-      });
-    }
+    advance(db, ctx, t, u, level, sign.comments?.trim() ?? '', null);
     return t;
   });
 }
@@ -966,7 +1144,7 @@ export function returnToMaker(
       throw new AppError('A comment is required when returning.', 'VALIDATION', {
         comments: 'Comment is required',
       });
-    insert(db, 'approvals', {
+    addApproval(db, {
       txnId: t.id,
       cycleNo: t.cycleNo,
       levelNo: level.levelNo,
@@ -988,7 +1166,7 @@ export function returnToMaker(
       db,
       ctx,
       t,
-      { status: 'RETURNED', returnComment: comments.trim(), wizardStep: 6 },
+      { status: 'RETURNED', returnComment: comments.trim(), wizardStep: WIZARD_STEPS },
       'RETURN',
       `returned to maker by ${level.label}`
     );
@@ -1010,7 +1188,7 @@ export function reject(ctx: Ctx, txnId: string, reason: string, version?: number
       throw new AppError('A reason is required when rejecting.', 'VALIDATION', {
         reason: 'Reason is required',
       });
-    insert(db, 'approvals', {
+    addApproval(db, {
       txnId: t.id,
       cycleNo: t.cycleNo,
       levelNo: level.levelNo,
@@ -1044,6 +1222,421 @@ export function reject(ctx: Ctx, txnId: string, reason: string, version?: number
     });
     return t;
   });
+}
+
+// ─── Internal Audit's own signature check ────────────────────────────────────
+
+/** Audit re-verifies signature and mandate against the instruction before signing. */
+export function auditVerify(ctx: Ctx, txnId: string, checks: SignatureChecks): TreasuryTxn {
+  return mutate((db) => {
+    const u = actor(db, ctx, ['AUD']);
+    const t = txnOf(db, txnId);
+    requireStatus(t, ['PENDING_AUDIT']);
+    if (!checks.sigOk || !checks.mandateOk || !checks.ownershipOk || !checks.completeOk)
+      throw new AppError(
+        'Tick all four checks. If something differs, return or reject the transaction instead.',
+        'VALIDATION'
+      );
+    const v = db.verifications.find((x) => x.txnId === t.id)!;
+    const { before, after } = update(db, 'verifications', v.id, {
+      auditVerifiedBy: u.id,
+      auditVerifiedAt: ctx.at,
+      auditCycleNo: t.cycleNo,
+    });
+    writeAudit(db, ctx, {
+      entity: 'Verification',
+      entityId: v.id,
+      action: 'AUDIT_SIGNATURE_VERIFIED',
+      summary: `${t.txnRef}: signature and mandate re-verified by Internal Audit`,
+      before,
+      after,
+    });
+    return t;
+  });
+}
+
+// ─── Paper signatures ────────────────────────────────────────────────────────
+
+export interface PaperApprovalArgs {
+  /** The approver who signed the printed voucher. */
+  signedBy: string;
+  reason: string;
+  documents: AttachmentInput[];
+}
+
+/**
+ * An approver who cannot use TreasuryDesk signs the printed voucher by hand; the maker uploads the
+ * scan and that level is recorded as signed on paper, in the approver's name.
+ */
+export function recordPaperApproval(
+  ctx: Ctx,
+  txnId: string,
+  a: PaperApprovalArgs,
+  version?: number
+): TreasuryTxn {
+  return mutate((db) => {
+    const u = actor(db, ctx, ['TO']);
+    const t = txnOf(db, txnId, version);
+    requireMaker(t, u);
+    const level = levelForStatus(t.status);
+    if (!level) throw new AppError('Not awaiting an approval.', 'STATE');
+    const errors: Record<string, string> = {};
+    const signer = findById(db, 'users', a.signedBy);
+    if (!signer || signer.status !== 'ACTIVE' || signer.roleCode !== level.roleCode)
+      errors.signedBy = `Choose the ${level.label} who signed`;
+    if (!a.reason.trim()) errors.reason = 'Say why it was signed on paper';
+    if (Object.keys(errors).length)
+      throw new AppError('Please correct the highlighted fields.', 'VALIDATION', errors);
+    checkAttachments(a.documents, true);
+    const blocker = approvalBlocker(db, t, signer!);
+    if (blocker) throw new AppError(`${signer!.fullName}: ${blocker}`, 'FORBIDDEN');
+    const ap = advance(db, ctx, t, signer!, level, a.reason.trim(), { recordedBy: u });
+    for (const f of a.documents) insertAttachment(db, ctx, t, 'PAPER_SIGNATURE', f, ap.id);
+    // A paper signature stands for the checks that level would have made in the app.
+    if (level.roleCode === 'AUD') {
+      const v = db.verifications.find((x) => x.txnId === t.id)!;
+      update(db, 'verifications', v.id, {
+        auditVerifiedBy: signer!.id,
+        auditVerifiedAt: ctx.at,
+        auditCycleNo: t.cycleNo,
+      });
+    }
+    writeAudit(db, ctx, {
+      entity: 'Approval',
+      entityId: ap.id,
+      action: 'PAPER_SIGNATURE',
+      summary: `${t.txnRef}: ${level.label} signed on paper by ${signer!.fullName}, uploaded by ${u.fullName} (${a.documents.length} file(s))`,
+      after: { signedBy: signer!.fullName, reason: a.reason.trim() },
+    });
+    return t;
+  });
+}
+
+// ─── Recall ──────────────────────────────────────────────────────────────────
+
+/** Bring the transaction back to the maker, editable; resubmission starts the chain again. */
+function recallToMaker(db: Db, ctx: Ctx, t: TreasuryTxn, by: AppUser, reason: string) {
+  // Recorded at the maker's own level: a recall is the maker acting, not a signature.
+  addApproval(db, {
+    txnId: t.id,
+    cycleNo: t.cycleNo,
+    levelNo: 1,
+    roleCode: 'TO',
+    userId: by.id,
+    action: 'RECALL',
+    comments: reason,
+    actedAt: ctx.at,
+  });
+  cancelPreparedPosting(db, t, 'Recalled');
+  const holder = TXN_STATUS_META[t.status].owner[0];
+  patchTxn(
+    db,
+    ctx,
+    t,
+    {
+      status: 'RETURNED',
+      returnComment: `Recalled by ${by.fullName}: ${reason}`,
+      wizardStep: WIZARD_STEPS,
+    },
+    'RECALL',
+    `recalled by the maker (${reason})`
+  );
+  if (holder)
+    notify(db, ctx, {
+      targetRole: holder,
+      title: `Recalled: ${t.txnRef}`,
+      body: `${by.fullName} recalled it: ${reason}`,
+      link: link(t),
+    });
+}
+
+function cancelPreparedPosting(db: Db, t: TreasuryTxn, why: string) {
+  const prepared = db.executions.find((e) => e.txnId === t.id && e.status === 'PREPARED');
+  if (prepared) update(db, 'executions', prepared.id, { status: 'RETURNED', failureReason: why });
+}
+
+/** The maker recalls their own transaction at any point before it is executed. */
+export function recall(ctx: Ctx, txnId: string, reason: string, version?: number): TreasuryTxn {
+  return mutate((db) => {
+    const u = actor(db, ctx, ['TO']);
+    const t = txnOf(db, txnId, version);
+    requireMaker(t, u);
+    requireStatus(t, RECALLABLE_STATUSES);
+    if (!reason.trim())
+      throw new AppError('Give a reason for the recall.', 'VALIDATION', {
+        reason: 'Reason is required',
+      });
+    recallToMaker(db, ctx, t, u, reason.trim());
+    // Anyone who had asked for a recall has their request answered by this one.
+    for (const r of db.recalls.filter((x) => x.txnId === t.id && x.status === 'PENDING'))
+      update(db, 'recalls', r.id, {
+        status: 'ACCEPTED',
+        decision: 'TO_MAKER',
+        decidedBy: u.id,
+        decidedAt: ctx.at,
+        decisionNote: 'Recalled by the maker',
+      });
+    return t;
+  });
+}
+
+/** Anyone other than the maker asks the maker to recall it. */
+export function requestRecall(ctx: Ctx, txnId: string, reason: string): RecallRequest {
+  return mutate((db) => {
+    const u = actor(db, ctx, ['AO', 'HT', 'MIS', 'AUD', 'MD', 'OPS']);
+    const t = txnOf(db, txnId);
+    if (t.makerId === u.id)
+      throw new AppError('You created this transaction — recall it yourself.', 'STATE');
+    requireStatus(t, RECALLABLE_STATUSES);
+    if (!reason.trim())
+      throw new AppError('Say why it should be recalled.', 'VALIDATION', {
+        reason: 'Reason is required',
+      });
+    if (
+      db.recalls.some((r) => r.txnId === t.id && r.requestedBy === u.id && r.status === 'PENDING')
+    )
+      throw new AppError('You have already asked for this to be recalled.', 'STATE');
+    const r = insert(db, 'recalls', {
+      txnId: t.id,
+      requestedBy: u.id,
+      reason: reason.trim(),
+      requestedAt: ctx.at,
+      status: 'PENDING',
+      decision: null,
+      decidedBy: null,
+      decidedAt: null,
+      decisionNote: '',
+    });
+    writeAudit(db, ctx, {
+      entity: 'RecallRequest',
+      entityId: r.id,
+      action: 'CREATE',
+      summary: `${t.txnRef}: recall requested by ${u.fullName} – ${reason.trim()}`,
+      after: { reason: reason.trim() },
+    });
+    notify(db, ctx, {
+      targetUserId: t.makerId,
+      title: `Recall requested: ${t.txnRef}`,
+      body: `${u.fullName} (${ROLE_LABELS[u.roleCode]}): ${reason.trim()}`,
+      link: link(t),
+    });
+    return r;
+  });
+}
+
+/** Whether a request can be answered by sending it back to the person who asked. */
+export function recallToRequesterBlocker(
+  db: Db,
+  t: TreasuryTxn,
+  requester: AppUser
+): string | null {
+  const target =
+    requester.roleCode === 'OPS' ? 7 : (levelForRole(requester.roleCode)?.levelNo ?? 0);
+  if (!target) return 'This person has no step in the approval chain';
+  if (target > chainPosition(t.status)) return `It has not reached ${requester.fullName} yet`;
+  return null;
+}
+
+/**
+ * The maker answers a recall request: bring it back to themselves (editable, restarts the chain),
+ * send it back to the person who asked so they can decide again, or decline.
+ */
+export function decideRecall(
+  ctx: Ctx,
+  requestId: string,
+  decision: RecallDecision | 'DECLINE',
+  note: string
+): RecallRequest {
+  return mutate((db) => {
+    const u = actor(db, ctx, ['TO']);
+    const r = getById(db, 'recalls', requestId, 'recall request');
+    const t = txnOf(db, r.txnId);
+    requireMaker(t, u);
+    if (r.status !== 'PENDING')
+      throw new AppError('This request has already been answered.', 'STATE');
+    const requester = getById(db, 'users', r.requestedBy, 'user');
+    if (decision === 'DECLINE') {
+      if (!note.trim())
+        throw new AppError('Say why you are declining.', 'VALIDATION', {
+          note: 'Reason is required',
+        });
+    } else {
+      requireStatus(t, RECALLABLE_STATUSES);
+    }
+    if (decision === 'TO_MAKER') {
+      recallToMaker(db, ctx, t, u, `at ${requester.fullName}'s request – ${r.reason}`);
+    } else if (decision === 'TO_REQUESTER') {
+      const blocker = recallToRequesterBlocker(db, t, requester);
+      if (blocker) throw new AppError(blocker, 'STATE');
+      const target = requester.roleCode === 'OPS' ? 7 : levelForRole(requester.roleCode)!.levelNo;
+      // Signatures from that level on no longer count; those levels sign again.
+      for (const a of liveApprovals(db, t).filter(
+        (x) => x.levelNo >= target && x.action === 'APPROVE'
+      )) {
+        update(db, 'approvals', a.id, { superseded: true });
+        const lvl = APPROVAL_LEVELS[a.levelNo - 1];
+        if (lvl) setControl(db, ctx, t.id, lvl.control as ControlCode, 'PENDING', 'Sent back');
+      }
+      cancelPreparedPosting(db, t, 'Sent back to Operations');
+      const status: TxnStatus =
+        target === 7 ? 'PENDING_OPERATIONS' : APPROVAL_LEVELS[target - 1].pendingStatus!;
+      patchTxn(
+        db,
+        ctx,
+        t,
+        { status },
+        'RECALL_TO_REQUESTER',
+        `sent back to ${requester.fullName} at their request (${r.reason})`
+      );
+      notify(db, ctx, {
+        targetUserId: requester.id,
+        title: `Sent back to you: ${t.txnRef}`,
+        body: `${u.fullName} accepted your recall request. It is waiting for you again.`,
+        link: link(t),
+      });
+    }
+    const { before, after } = update(db, 'recalls', r.id, {
+      status: decision === 'DECLINE' ? 'DECLINED' : 'ACCEPTED',
+      decision: decision === 'DECLINE' ? null : decision,
+      decidedBy: u.id,
+      decidedAt: ctx.at,
+      decisionNote: note.trim(),
+    });
+    writeAudit(db, ctx, {
+      entity: 'RecallRequest',
+      entityId: r.id,
+      action: decision === 'DECLINE' ? 'DECLINE' : 'ACCEPT',
+      summary: `${t.txnRef}: recall request from ${requester.fullName} ${decision === 'DECLINE' ? 'declined' : decision === 'TO_MAKER' ? 'accepted – back to the maker' : 'accepted – back to the requester'}`,
+      before,
+      after,
+    });
+    if (decision === 'DECLINE')
+      notify(db, ctx, {
+        targetUserId: requester.id,
+        title: `Recall declined: ${t.txnRef}`,
+        body: `${u.fullName}: ${note.trim()}`,
+        link: link(t),
+      });
+    return getById(db, 'recalls', r.id, 'recall request');
+  });
+}
+
+// ─── Batches ─────────────────────────────────────────────────────────────────
+
+export interface BatchSubmitResult {
+  batch: TxnBatch | null;
+  submitted: string[];
+  failed: { id: string; txnRef: string; reason: string }[];
+}
+
+/** Submit several ready transactions together with one signature. */
+export function submitBatch(
+  ctx: Ctx,
+  txnIds: string[],
+  sign: SignArgs,
+  note = ''
+): BatchSubmitResult {
+  return mutate((db) => {
+    const u = actor(db, ctx, ['TO']);
+    if (txnIds.length < 2)
+      throw new AppError('Choose at least two transactions for a batch.', 'VALIDATION');
+    checkSignature(u, sign);
+    const year = yearOf(today(ctx));
+    const batch = insert(db, 'batches', {
+      batchRef: `BAT-${year}-${String(nextCounter(db, `batch:${year}`)).padStart(4, '0')}`,
+      makerId: u.id,
+      txnIds: [],
+      note: note.trim(),
+      createdAt: ctx.at,
+    });
+    const out: BatchSubmitResult = { batch: null, submitted: [], failed: [] };
+    for (const id of txnIds) {
+      const t = findById(db, 'txns', id);
+      if (!t) continue;
+      try {
+        submitOne(db, ctx, u, t, sign, batch.id);
+        out.submitted.push(id);
+      } catch (e) {
+        out.failed.push({ id, txnRef: t.txnRef, reason: (e as Error).message });
+      }
+    }
+    if (!out.submitted.length) {
+      remove(db, 'batches', batch.id);
+      throw new AppError(
+        `None of the transactions could be submitted: ${out.failed.map((f) => `${f.txnRef} – ${f.reason}`).join('; ')}`,
+        'VALIDATION'
+      );
+    }
+    update(db, 'batches', batch.id, { txnIds: out.submitted });
+    writeAudit(db, ctx, {
+      entity: 'TxnBatch',
+      entityId: batch.id,
+      action: 'SUBMIT',
+      summary: `${batch.batchRef}: ${out.submitted.length} transaction(s) submitted together`,
+      after: { txnIds: out.submitted, failed: out.failed.length },
+    });
+    out.batch = getById(db, 'batches', batch.id, 'batch');
+    return out;
+  });
+}
+
+export type BatchAction = 'APPROVE' | 'RETURN' | 'REJECT';
+export interface BatchItemDecision {
+  txnId: string;
+  action: BatchAction;
+  comment?: string;
+}
+export interface BatchDecisionResult {
+  done: { id: string; txnRef: string; action: BatchAction }[];
+  failed: { id: string; txnRef: string; reason: string }[];
+}
+
+/**
+ * One approver decides on several items of a batch with one signature: approved items move on,
+ * returned or rejected ones go back to the maker. Each item is decided on its own, so one failure
+ * does not hold up the rest.
+ */
+export function decideBatch(
+  ctx: Ctx,
+  batchId: string,
+  decisions: BatchItemDecision[],
+  sign: SignArgs
+): BatchDecisionResult {
+  const db0 = getDb();
+  const batch = getById(db0, 'batches', batchId, 'batch');
+  const u = actor(db0, ctx);
+  if (!decisions.length) throw new AppError('Choose at least one item.', 'VALIDATION');
+  checkSignature(u, sign);
+  for (const d of decisions)
+    if (d.action !== 'APPROVE' && !d.comment?.trim())
+      throw new AppError('Give a reason for every item you return or reject.', 'VALIDATION', {
+        [d.txnId]: 'Reason is required',
+      });
+  const out: BatchDecisionResult = { done: [], failed: [] };
+  for (const d of decisions) {
+    const t = findById(getDb(), 'txns', d.txnId);
+    if (!t || !batch.txnIds.includes(d.txnId)) continue;
+    try {
+      if (d.action === 'APPROVE')
+        approve(ctx, d.txnId, { ...sign, comments: d.comment ?? sign.comments });
+      else if (d.action === 'RETURN') returnToMaker(ctx, d.txnId, d.comment!);
+      else reject(ctx, d.txnId, d.comment!);
+      out.done.push({ id: t.id, txnRef: t.txnRef, action: d.action });
+    } catch (e) {
+      out.failed.push({ id: t.id, txnRef: t.txnRef, reason: (e as Error).message });
+    }
+  }
+  mutate((db) => {
+    const count = (a: BatchAction) => out.done.filter((x) => x.action === a).length;
+    writeAudit(db, ctx, {
+      entity: 'TxnBatch',
+      entityId: batch.id,
+      action: 'DECIDE',
+      summary: `${batch.batchRef}: ${u.fullName} approved ${count('APPROVE')}, returned ${count('RETURN')}, rejected ${count('REJECT')}`,
+      after: { done: out.done, failed: out.failed },
+    });
+  });
+  return out;
 }
 
 export function cancel(ctx: Ctx, txnId: string, reason: string, version?: number): TreasuryTxn {
@@ -1333,48 +1926,116 @@ function applyEffects(db: Db, ctx: Ctx, t: TreasuryTxn) {
   return resultInvestmentId;
 }
 
-export interface ExecuteArgs {
-  cbsPostingRef: string;
-  gaps: GapsOutcome | null;
-}
-
-/** Operations execute in Eazybankz (and GAPS where money leaves the bank). */
-export function execute(ctx: Ctx, txnId: string, a: ExecuteArgs, version?: number): TreasuryTxn {
+/**
+ * Operations, step one: an officer keys the Eazybankz posting reference. Nothing is posted yet —
+ * a second Operations officer must approve it.
+ */
+export function prepareExecution(
+  ctx: Ctx,
+  txnId: string,
+  cbsPostingRef: string,
+  version?: number
+): TreasuryTxn {
   return mutate((db) => {
     const u = actor(db, ctx, ['OPS']);
     const t = txnOf(db, txnId, version);
     requireStatus(t, ['PENDING_OPERATIONS', 'EXEC_FAILED']);
     if (t.makerId === u.id)
       throw new AppError('Maker-checker: you created this transaction.', 'FORBIDDEN');
-    if (!a.cbsPostingRef.trim()) {
+    if (!cbsPostingRef.trim())
       throw new AppError('Enter the Eazybankz posting reference.', 'VALIDATION', {
         cbsPostingRef: 'Posting reference is required',
       });
-    }
-    const gapsNeeded = gapsRequired(db, t);
-    if (gapsNeeded && !a.gaps) throw new AppError('Send the payment to GAPS first.', 'VALIDATION');
     const attemptNo = db.executions.filter((e) => e.txnId === t.id).length + 1;
-    const outcome = gapsNeeded ? a.gaps! : null;
+    const ex = insert(db, 'executions', {
+      txnId: t.id,
+      attemptNo,
+      cbsPostingRef: cbsPostingRef.trim(),
+      gapsRef: null,
+      status: 'PREPARED',
+      failureReason: null,
+      executedBy: u.id,
+      executedAt: ctx.at,
+      approvedBy: null,
+      approvedAt: null,
+      confirmedBy: null,
+      confirmedAt: null,
+    });
+    writeAudit(db, ctx, {
+      entity: 'Execution',
+      entityId: ex.id,
+      action: 'PREPARE',
+      summary: `${t.txnRef}: posting ${ex.cbsPostingRef} keyed by ${u.fullName}, awaiting a second officer`,
+      after: { cbsPostingRef: ex.cbsPostingRef, attemptNo },
+    });
+    patchTxn(
+      db,
+      ctx,
+      t,
+      { status: 'PENDING_OPS_APPROVAL' },
+      'PREPARE',
+      `posting keyed by ${u.fullName}`
+    );
+    notify(db, ctx, {
+      targetRole: 'OPS',
+      title: `Posting to approve: ${t.txnRef}`,
+      body: `${u.fullName} keyed ${ex.cbsPostingRef}. Another Operations officer must approve it.`,
+      link: link(t),
+    });
+    return t;
+  });
+}
+
+/** The prepared posting awaiting a second officer, if any. */
+export function preparedPosting(db: Db, txnId: string) {
+  return db.executions.find((e) => e.txnId === txnId && e.status === 'PREPARED');
+}
+
+/** Why this user cannot approve the prepared posting (null = can). */
+export function opsApprovalBlocker(db: Db, t: TreasuryTxn, u: AppUser): string | null {
+  if (t.status !== 'PENDING_OPS_APPROVAL') return 'No posting is waiting for approval';
+  if (u.roleCode !== 'OPS') return 'Only Operations approve a posting';
+  const ex = preparedPosting(db, t.id);
+  if (!ex) return 'No posting is waiting for approval';
+  if (ex.executedBy === u.id)
+    return 'You keyed this posting — another Operations officer must approve it';
+  if (t.makerId === u.id) return 'Maker-checker: you created this transaction';
+  return null;
+}
+
+/**
+ * Operations, step two: a different officer approves the posting, and only then is it executed —
+ * posted in Eazybankz and, where money leaves the bank, sent to GAPS.
+ */
+export function approveExecution(
+  ctx: Ctx,
+  txnId: string,
+  gaps: GapsOutcome | null,
+  version?: number
+): TreasuryTxn {
+  return mutate((db) => {
+    const u = actor(db, ctx, ['OPS']);
+    const t = txnOf(db, txnId, version);
+    const blocker = opsApprovalBlocker(db, t, u);
+    if (blocker) throw new AppError(blocker, 'FORBIDDEN');
+    const ex = preparedPosting(db, t.id)!;
+    const gapsNeeded = gapsRequired(db, t);
+    if (gapsNeeded && !gaps) throw new AppError('Send the payment to GAPS first.', 'VALIDATION');
+    const outcome = gapsNeeded ? gaps! : null;
 
     if (outcome && !outcome.ok) {
-      const ex = insert(db, 'executions', {
-        txnId: t.id,
-        attemptNo,
-        cbsPostingRef: a.cbsPostingRef.trim(),
-        gapsRef: null,
+      update(db, 'executions', ex.id, {
         status: 'FAILED',
         failureReason: outcome.reason,
-        executedBy: u.id,
-        executedAt: ctx.at,
-        confirmedBy: null,
-        confirmedAt: null,
+        approvedBy: u.id,
+        approvedAt: ctx.at,
       });
       writeAudit(db, ctx, {
         entity: 'Execution',
         entityId: ex.id,
         action: 'GAPS_FAILED',
         summary: `${t.txnRef}: GAPS submission failed – ${outcome.reason}`,
-        after: { attemptNo, failureReason: outcome.reason },
+        after: { attemptNo: ex.attemptNo, failureReason: outcome.reason },
       });
       patchTxn(
         db,
@@ -1387,31 +2048,27 @@ export function execute(ctx: Ctx, txnId: string, a: ExecuteArgs, version?: numbe
       notify(db, ctx, {
         targetUserId: t.makerId,
         title: `Execution failed: ${t.txnRef}`,
-        body: `GAPS: ${outcome.reason}. Operations will retry.`,
+        body: `GAPS: ${outcome.reason}. Operations will key it again.`,
         link: link(t),
       });
       return t;
     }
 
     const resultInvestmentId = applyEffects(db, ctx, t);
-    const ex = insert(db, 'executions', {
-      txnId: t.id,
-      attemptNo,
-      cbsPostingRef: a.cbsPostingRef.trim(),
-      gapsRef: outcome && outcome.ok ? outcome.gapsRef : null,
+    update(db, 'executions', ex.id, {
       status: 'SUCCESS',
-      failureReason: null,
-      executedBy: u.id,
-      executedAt: ctx.at,
-      confirmedBy: null,
-      confirmedAt: null,
+      gapsRef: outcome && outcome.ok ? outcome.gapsRef : null,
+      approvedBy: u.id,
+      approvedAt: ctx.at,
     });
+    const done = getById(db, 'executions', ex.id, 'execution');
+    const preparer = findById(db, 'users', done.executedBy);
     writeAudit(db, ctx, {
       entity: 'Execution',
       entityId: ex.id,
       action: 'EXECUTED',
-      summary: `${t.txnRef}: posted in Eazybankz (${ex.cbsPostingRef})${ex.gapsRef ? `, GAPS ${ex.gapsRef}` : ''}`,
-      after: { cbsPostingRef: ex.cbsPostingRef, gapsRef: ex.gapsRef },
+      summary: `${t.txnRef}: posted in Eazybankz (${done.cbsPostingRef})${done.gapsRef ? `, GAPS ${done.gapsRef}` : ''} – keyed by ${preparer?.fullName}, approved by ${u.fullName}`,
+      after: { cbsPostingRef: done.cbsPostingRef, gapsRef: done.gapsRef, approvedBy: u.id },
     });
     setControl(
       db,
@@ -1419,7 +2076,7 @@ export function execute(ctx: Ctx, txnId: string, a: ExecuteArgs, version?: numbe
       t.id,
       'C11',
       'PASSED',
-      `Posting ${ex.cbsPostingRef}${ex.gapsRef ? ` · GAPS ${ex.gapsRef}` : ''}`
+      `Posting ${done.cbsPostingRef}${done.gapsRef ? ` · GAPS ${done.gapsRef}` : ''} · keyed by ${preparer?.fullName}, approved by ${u.fullName}`
     );
     patchTxn(
       db,
@@ -1433,6 +2090,47 @@ export function execute(ctx: Ctx, txnId: string, a: ExecuteArgs, version?: numbe
       targetUserId: t.makerId,
       title: `Executed: ${t.txnRef}`,
       body: 'Confirm completion with the customer to close the transaction.',
+      link: link(t),
+    });
+    return t;
+  });
+}
+
+/** The second officer sends a keyed posting back to be corrected. */
+export function returnExecution(
+  ctx: Ctx,
+  txnId: string,
+  reason: string,
+  version?: number
+): TreasuryTxn {
+  return mutate((db) => {
+    const u = actor(db, ctx, ['OPS']);
+    const t = txnOf(db, txnId, version);
+    const blocker = opsApprovalBlocker(db, t, u);
+    if (blocker) throw new AppError(blocker, 'FORBIDDEN');
+    if (!reason.trim())
+      throw new AppError('Say what needs correcting.', 'VALIDATION', {
+        reason: 'Reason is required',
+      });
+    const ex = preparedPosting(db, t.id)!;
+    update(db, 'executions', ex.id, {
+      status: 'RETURNED',
+      failureReason: reason.trim(),
+      approvedBy: u.id,
+      approvedAt: ctx.at,
+    });
+    patchTxn(
+      db,
+      ctx,
+      t,
+      { status: 'PENDING_OPERATIONS' },
+      'POSTING_RETURNED',
+      `posting ${ex.cbsPostingRef} sent back by ${u.fullName} (${reason.trim()})`
+    );
+    notify(db, ctx, {
+      targetUserId: ex.executedBy,
+      title: `Posting sent back: ${t.txnRef}`,
+      body: `${u.fullName}: ${reason.trim()}`,
       link: link(t),
     });
     return t;
@@ -1563,6 +2261,69 @@ export function deleteComment(ctx: Ctx, commentId: string, version?: number): vo
       action: 'DELETE',
       summary: 'Comment deleted',
       before: { body: c.body },
+    });
+  });
+}
+
+// ─── Supporting documents ────────────────────────────────────────────────────
+
+/** Anyone working on a transaction can attach supporting documents, several at a time. */
+export function addSupportingDocuments(
+  ctx: Ctx,
+  txnId: string,
+  files: AttachmentInput[]
+): Attachment[] {
+  return mutate((db) => {
+    const u = actor(db, ctx, ['TO', 'AO', 'HT', 'MIS', 'AUD', 'MD', 'OPS']);
+    const t = txnOf(db, txnId);
+    if (u.roleCode === 'AO') {
+      const c = findById(db, 'customers', t.customerId);
+      if (c?.accountOfficerId !== u.id)
+        throw new AppError(
+          'Account Officers can only add documents for their own customers.',
+          'FORBIDDEN'
+        );
+    }
+    checkAttachments(
+      files.map((f) => ({ ...f, id: undefined })),
+      true
+    );
+    const onFile = db.attachments.filter((a) => a.txnId === t.id && a.kind === 'SUPPORTING');
+    if (onFile.length + files.length > MAX_ATTACHMENTS * 3)
+      throw new AppError('This transaction already has the most documents allowed.', 'VALIDATION');
+    const added = files.map((f) =>
+      insertAttachment(db, ctx, t, 'SUPPORTING', { ...f, id: undefined })
+    );
+    writeAudit(db, ctx, {
+      entity: 'Attachment',
+      entityId: t.id,
+      action: 'ADD',
+      summary: `${t.txnRef}: ${added.length} supporting document(s) added by ${u.fullName}`,
+      after: { files: added.map((a) => a.fileName) },
+    });
+    return added;
+  });
+}
+
+/** Whoever uploaded a supporting document can remove it while the transaction is still open. */
+export function removeSupportingDocument(ctx: Ctx, attachmentId: string): void {
+  mutate((db) => {
+    const u = actor(db, ctx);
+    const a = getById(db, 'attachments', attachmentId, 'document');
+    const t = txnOf(db, a.txnId);
+    if (a.kind !== 'SUPPORTING')
+      throw new AppError('Only supporting documents can be removed here.', 'STATE');
+    if (a.uploadedBy !== u.id)
+      throw new AppError('You can only remove documents you uploaded.', 'FORBIDDEN');
+    if (CLOSED_STATUSES.includes(t.status))
+      throw new AppError('The transaction is closed; its documents are kept.', 'STATE');
+    remove(db, 'attachments', a.id);
+    writeAudit(db, ctx, {
+      entity: 'Attachment',
+      entityId: a.id,
+      action: 'DELETE',
+      summary: `${t.txnRef}: supporting document ${a.fileName} removed`,
+      before: { fileName: a.fileName },
     });
   });
 }

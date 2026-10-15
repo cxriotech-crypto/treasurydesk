@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { ArrowLeft, Eye, PenLine, Save } from 'lucide-react';
 import type { TxnInput } from '@/domain/types';
@@ -11,7 +11,8 @@ import {
   type ProductCode,
   type ScenarioCode,
 } from '@/domain/codes';
-import { formatNaira, formatRate } from '@/lib/format';
+import { daysBetween } from '@/lib/dates';
+import { formatDateWithDay, formatNaira, formatRate } from '@/lib/format';
 import { settingsService, transactionsService } from '@/services';
 import { useCurrentUser, useData } from '@/services/useData';
 import { useDebounced } from '@/components/hooks';
@@ -22,6 +23,7 @@ import {
   Field,
   InlineAlert,
   Input,
+  Modal,
   MoneyInput,
   Select,
   SignatureModal,
@@ -131,6 +133,25 @@ export function StepVoucher({ detail, goTo }: StepProps) {
   const errors = comp.data?.errors ?? {};
   const vouchers = useMemo(() => comp.data?.vouchers ?? [], [comp.data]);
   const hasErrors = Object.keys(errors).length > 0;
+
+  // A new maturity on a weekend or public holiday: ask, suggesting the next business day.
+  const prompt = comp.data?.maturityPrompt ?? null;
+  const [promptOpen, setPromptOpen] = useState(false);
+  const [askedFor, setAskedFor] = useState<string | null>(null);
+  const [otherDate, setOtherDate] = useState('');
+  useEffect(() => {
+    if (prompt && prompt.maturityDate !== askedFor) {
+      setAskedFor(prompt.maturityDate);
+      setOtherDate('');
+      setPromptOpen(true);
+    }
+    if (!prompt) setPromptOpen(false);
+  }, [prompt, askedFor]);
+  const moveTo = (tenor: number) => {
+    if (!prompt) return;
+    set(prompt.field, tenor);
+    setPromptOpen(false);
+  };
   const current = vouchers[Number(tab)] ?? vouchers[0];
 
   const defaults = useMemo(() => {
@@ -144,7 +165,7 @@ export function StepVoucher({ detail, goTo }: StepProps) {
   }, [vouchers, investment]);
 
   const save = async (silent = false) => {
-    await transactionsService.saveDraft(txn.id, { input: clean(input), wizardStep: 6 });
+    await transactionsService.saveDraft(txn.id, { input: clean(input), wizardStep: 5 });
     if (!silent) toast.success('Draft saved');
   };
 
@@ -373,11 +394,17 @@ export function StepVoucher({ detail, goTo }: StepProps) {
         ) : null}
       </section>
 
-      {detail.controls.find((c) => c.controlCode === 'C03')?.state !== 'PASSED' ? (
-        <InlineAlert tone="warning" title="Customer call-back outstanding">
-          {detail.accountOfficerName} has not confirmed this instruction with{' '}
-          {detail.customer.customerName} yet. You can still submit — every approver sees the same
-          warning.
+      {prompt ? (
+        <InlineAlert tone="warning" title="The maturity date is not a business day">
+          <span className="flex flex-wrap items-center justify-between gap-2">
+            <span>
+              It would mature on {formatDateWithDay(prompt.maturityDate)}, a{' '}
+              {prompt.weekend ? 'weekend' : 'public holiday'}.
+            </span>
+            <Button size="sm" onClick={() => setPromptOpen(true)}>
+              Change the date
+            </Button>
+          </span>
         </InlineAlert>
       ) : null}
 
@@ -427,7 +454,7 @@ export function StepVoucher({ detail, goTo }: StepProps) {
       </section>
 
       <div className="flex flex-col-reverse gap-2 border-t border-border pt-4 sm:flex-row sm:flex-wrap sm:justify-between">
-        <Button icon={ArrowLeft} onClick={() => goTo(5)}>
+        <Button icon={ArrowLeft} onClick={() => goTo(4)}>
           Back
         </Button>
         <div className="flex flex-col-reverse gap-2 sm:flex-row">
@@ -462,6 +489,55 @@ export function StepVoucher({ detail, goTo }: StepProps) {
         </div>
       </div>
 
+      <Modal
+        open={promptOpen && !!prompt}
+        onClose={() => setPromptOpen(false)}
+        size="sm"
+        title="Change the maturity date?"
+        description={
+          prompt
+            ? `With a tenor of ${prompt.tenorDays} days it would mature on ${formatDateWithDay(prompt.maturityDate)}, a ${prompt.weekend ? 'weekend' : 'public holiday'}.`
+            : undefined
+        }
+        footer={
+          prompt ? (
+            <>
+              <Button onClick={() => setPromptOpen(false)}>Not now</Button>
+              <Button variant="primary" onClick={() => moveTo(prompt.suggestedTenorDays)}>
+                Move to {formatDateWithDay(prompt.suggestedDate)}
+              </Button>
+            </>
+          ) : null
+        }
+      >
+        {prompt ? (
+          <div className="space-y-3 text-sm">
+            <p>
+              Moving it to the next business day makes the tenor{' '}
+              <span className="num font-medium">{prompt.suggestedTenorDays} days</span>.
+            </p>
+            <Field
+              label="Or choose another maturity date"
+              hint={`Effective ${formatDateWithDay(prompt.effectiveDate)}`}
+            >
+              <span className="flex gap-2">
+                <DateInput
+                  value={otherDate}
+                  min={prompt.effectiveDate}
+                  onChange={(e) => setOtherDate(e.target.value)}
+                />
+                <Button
+                  disabledReason={otherDate ? null : 'Pick a date first'}
+                  onClick={() => moveTo(daysBetween(prompt.effectiveDate, otherDate))}
+                >
+                  Use this date
+                </Button>
+              </span>
+            </Field>
+          </div>
+        ) : null}
+      </Modal>
+
       <ConfirmDialog
         open={switchOff !== null}
         onClose={() => setSwitchOff(null)}
@@ -495,7 +571,7 @@ export function StepVoucher({ detail, goTo }: StepProps) {
         open={signOpen}
         onClose={() => setSignOpen(false)}
         title={txn.status === 'RETURNED' ? 'Sign and resubmit' : 'Sign and submit'}
-        description="Your signature is level 1 of 5. The transaction goes to Head, Treasury next."
+        description={`Your signature is level 1 of 6. It goes next to ${detail.accountOfficerName}, the customer's Account Officer, who calls the customer and checks it.`}
         actionLabel="Sign & submit"
         summary={
           comp.data ? (
@@ -516,7 +592,7 @@ export function StepVoucher({ detail, goTo }: StepProps) {
           const t = await transactionsService.signAndSubmit(txn.id, sig);
           toast.success(
             `${t.txnRef} submitted`,
-            `Signed by ${me?.fullName}. Awaiting Head, Treasury.`
+            `Signed by ${me?.fullName}. Awaiting ${detail.accountOfficerName} (Account Officer).`
           );
           router.push(`/transactions/${t.id}`);
         }}

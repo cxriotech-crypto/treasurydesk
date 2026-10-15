@@ -149,14 +149,14 @@ export function Segmented<T extends string>({
 }: {
   value: T | '';
   onChange: (v: T) => void;
-  options: { value: T; label: string }[];
+  options: { value: T; label: string; disabled?: boolean }[];
   label: string;
 }) {
   return (
     <div
       role="radiogroup"
       aria-label={label}
-      className="inline-flex rounded-md border border-border-strong bg-surface p-0.5"
+      className="inline-flex whitespace-nowrap rounded-md border border-border-strong bg-surface p-0.5"
     >
       {options.map((o) => (
         <button
@@ -164,9 +164,10 @@ export function Segmented<T extends string>({
           type="button"
           role="radio"
           aria-checked={value === o.value}
+          disabled={o.disabled}
           onClick={() => onChange(o.value)}
           className={cn(
-            'h-9 rounded px-3 text-[13px] font-medium transition-colors md:h-7',
+            'h-9 rounded px-3 text-[13px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 md:h-7',
             value === o.value ? 'bg-brand text-brand-fg' : 'text-muted hover:text-fg'
           )}
         >
