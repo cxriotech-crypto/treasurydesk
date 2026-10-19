@@ -478,7 +478,7 @@ function populate(db: Db, T: string, anchor: string, fresh: boolean) {
           : 'ANY_TWO';
     insert(db, 'mandates', { customerId: c.id, ruleCode, effectiveDate: isoDatePart(c.createdAt) });
     const opened = isoDatePart(c.createdAt);
-    // Every customer has Savings and a Personal Account; companies (and every third individual) a Current account.
+    // Every customer has Savings and a Personal Account; companies (and every third individual) a Call / CMS account.
     const products: AccountProductCode[] =
       customerType === 'CORP' || nameIdx % 3 === 0 ? ['SS', 'PA', 'CA'] : ['SS', 'PA'];
     for (const productCode of products) {
@@ -772,8 +772,6 @@ function populate(db: Db, T: string, anchor: string, fresh: boolean) {
   // History subjects: an investment shaped for the scenario on day D.
   const histSubject = (scenario: ScenarioCode, D: string): Investment => {
     const c = cust();
-    if (scenario === 'COT_CALL')
-      return mkInv({ customer: c, eff: addDays(D, -rng.int(10, 25)), tenor: 90, product: 'CALL' });
     if (scenario === 'PRELIQ_FULL' || scenario === 'PRELIQ_PARTIAL') {
       return mkInv({
         customer: c,
@@ -852,7 +850,6 @@ function populate(db: Db, T: string, anchor: string, fresh: boolean) {
             ['PA', 3],
             ['SS', 2],
             ['CA', 2],
-            ['CALL', 1],
             ['OTHER', 1],
           ]);
           const creditTo: CreditTarget = pick === 'CA' && !ca(s.customer) ? 'PA' : pick;
@@ -860,7 +857,7 @@ function populate(db: Db, T: string, anchor: string, fresh: boolean) {
             valueDate: valueDay,
             amount: amountBetween(rng, 500_000, 40_000_000, 50_000),
             creditTo,
-            ...(creditTo === 'CALL' || creditTo === 'OTHER'
+            ...(creditTo === 'OTHER'
               ? { creditAccountNo: String(rng.int(1_000_000_000, 9_999_999_999)) }
               : {}),
             ...(creditTo === 'OTHER' ? { creditOther: 'Loan repayment account' } : {}),
@@ -901,11 +898,6 @@ function populate(db: Db, T: string, anchor: string, fresh: boolean) {
           [...buckets.matured, ...buckets.today, ...buckets.next7],
           (i) => i.maturityDate <= addDays(T, 6)
         );
-      } else if (meta.txnType === 'COT') {
-        inv = take(
-          [...buckets.long, ...buckets.next30, ...buckets.next7],
-          (i) => i.productCode === 'CALL' && i.maturityDate > addDays(T, 5)
-        );
       } else if (meta.txnType === 'ANNIVERSARY') {
         inv = take(buckets.anniv, (i) => (i.nextAnnivDate ?? '') <= addDays(T, 12));
       } else {
@@ -921,14 +913,14 @@ function populate(db: Db, T: string, anchor: string, fresh: boolean) {
         const a = ca(x);
         return !!a && !used.has(a.id) && Number(a.availableBal) >= 3_000_000;
       });
-      if (!c) throw new Error('Seed: no customer with a Current account for COT');
+      if (!c) throw new Error('Seed: no customer with a Call / CMS account for COT');
       used.add(ca(c)!.id);
       return () => ({ customer: c, account: ca(c)! });
     }
     if (meta.subject === 'ACCOUNT') {
       const c =
         scenario === 'TRANSFER_SS_PA' ? richCustomer(ss, '1000000') : richCustomer(pa, '3000000');
-      // Third-party payments go out of a Current account where the customer has one (COT applies).
+      // Third-party payments go out of a Call / CMS account where the customer has one.
       const fromCa = meta.txnType === 'THIRD_PARTY' && !!ca(c) && rng.chance(0.6);
       return () => ({
         customer: c,
@@ -977,7 +969,7 @@ function populate(db: Db, T: string, anchor: string, fresh: boolean) {
     ['TRANSFER_PA_CP', 3, {}],
     ['INFLOW_ACCOUNT', 2, {}],
     ['COT_CMS', 8, {}],
-    ['COT_CALL', 5, {}],
+    ['COT_CMS', 5, {}],
   ];
   for (const [scenario, back, extra] of hist) {
     const start = histStart(back);
@@ -1079,7 +1071,7 @@ function populate(db: Db, T: string, anchor: string, fresh: boolean) {
   recent('INFLOW_ACCOUNT', 'VERIFICATION');
   // Commission on turnover, its own transaction: Treasury Officer → Head of Treasury → Operations.
   recent('COT_CMS', 'PENDING_HEAD_TREASURY');
-  recent('COT_CALL', 'PENDING_HEAD_TREASURY');
+  recent('COT_CMS', 'PENDING_HEAD_TREASURY');
   recent('COT_CMS', 'PENDING_OPERATIONS');
   // A second batch: two items, both still with their Account Officers.
   recent('TRANSFER_SS_PA', 'PENDING_ACCOUNT_OFFICER', { batchKey: 'B2' });

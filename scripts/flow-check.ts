@@ -417,7 +417,7 @@ async function main() {
           if (s === 'COT_CMS') {
             const now = d.accounts.find((a) => a.id === t.sourceAccountId)!.availableBal;
             if (now !== sub(srcBefore, cot))
-              throw new Error(`Current account not debited (${srcBefore} → ${now})`);
+              throw new Error(`Call / CMS account not debited (${srcBefore} → ${now})`);
           }
           effect = `₦50,000 COT at ₦5 per mille · Treasury Officer → Head of Treasury → Operations`;
           break;
@@ -878,7 +878,7 @@ async function main() {
     const plain = await S.transactionsService.preview(tp.id, { amount: '1000000.00' });
     plain.vouchers[0].cotAmt === '0.00' &&
     !plain.vouchers[0].rows.some((r) => r.label.includes('COT'))
-      ? pass('A payment out of a Current account carries no COT', 'COT is its own transaction')
+      ? pass('A payment out of a Call / CMS account carries no COT', 'COT is its own transaction')
       : fail('No COT on other transactions', plain.vouchers[0].cotAmt);
     await S.transactionsService.cancel(tp.id, 'flow check');
   } catch (e) {

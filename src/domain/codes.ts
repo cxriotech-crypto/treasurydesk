@@ -199,7 +199,7 @@ export const TXN_TYPE_META: Record<TxnType, { sop: number; label: string; descri
   COT: {
     sop: 0, // not an SOP transaction: added at the client's request
     label: 'Commission on turnover',
-    description: 'Charge COT on a Current (CMS) or Call account',
+    description: 'Charge COT on a Call / CMS account',
   },
 };
 
@@ -235,7 +235,6 @@ export const SCENARIO_CODES = [
   'INFLOW',
   'INFLOW_ACCOUNT',
   'COT_CMS',
-  'COT_CALL',
 ] as const;
 export type ScenarioCode = (typeof SCENARIO_CODES)[number];
 
@@ -398,42 +397,31 @@ export const SCENARIO_META: Record<ScenarioCode, ScenarioMeta> = {
     letter: 'B',
     label: 'Credit to an account',
     description:
-      'Credit funds received to the customer’s Personal, Savings, Current or Call account, or another account',
+      'Credit funds received to the customer’s Personal, Savings or Call / CMS account, or another account',
     vouchers: ['FI'],
     payout: false,
     subject: 'CUSTOMER',
   },
   COT_CMS: {
     txnType: 'COT',
-    letter: 'A',
-    label: 'Current (CMS) account',
+    letter: '',
+    label: 'Call / CMS account',
     description:
-      'Charge COT on the turnover of a customer’s Current account, at the rate you choose',
+      'Charge COT on the turnover of a customer’s Call / CMS (current) account, at the rate you choose',
     vouchers: ['CT'],
     payout: false,
     subject: 'ACCOUNT',
     instruction: false,
   },
-  COT_CALL: {
-    txnType: 'COT',
-    letter: 'B',
-    label: 'Call account',
-    description: 'Charge COT on the turnover of a Call placement, at the rate you choose',
-    vouchers: ['CT'],
-    payout: false,
-    subject: 'INVESTMENT',
-    instruction: false,
-  },
 };
 
 /** Where an inflow credited to an account (Inflow B) goes. */
-export const CREDIT_TARGETS = ['PA', 'SS', 'CA', 'CALL', 'OTHER'] as const;
+export const CREDIT_TARGETS = ['PA', 'SS', 'CA', 'OTHER'] as const;
 export type CreditTarget = (typeof CREDIT_TARGETS)[number];
 export const CREDIT_TARGET_LABELS: Record<CreditTarget, string> = {
   PA: 'Personal Account',
   SS: 'Savings account',
-  CA: 'Current account',
-  CALL: 'Call account',
+  CA: 'Call / CMS account',
   OTHER: 'Other',
 };
 
@@ -501,11 +489,12 @@ export const PRODUCT_LABELS: Record<ProductCode, string> = {
   CALL: 'Call Placement',
 };
 
+/** CA: the Call / CMS account — the customer's current account (Call and CMS are two names for it). */
 export type AccountProductCode = 'SS' | 'PA' | 'CA';
 export const ACCOUNT_PRODUCT_LABELS: Record<AccountProductCode, string> = {
   SS: 'Savings',
   PA: 'Personal Account',
-  CA: 'Current account',
+  CA: 'Call / CMS account',
 };
 /** First two digits of a new account number for each account type. */
 export const ACCOUNT_NO_PREFIX: Record<AccountProductCode, string> = {

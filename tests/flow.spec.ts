@@ -331,7 +331,7 @@ test.describe('Transaction flows', () => {
     await login(page, 'TO');
     await page.goto('/transactions/new');
     await page.getByRole('radio', { name: /Commission on turnover/ }).click();
-    await page.getByRole('radio', { name: /^A\. Current \(CMS\) account/ }).click();
+    await page.getByRole('radio', { name: /^Call \/ CMS account/ }).click();
     const combo = page.locator('main input[role="combobox"]');
     const options = page.locator('main [role="option"]');
     let picked = false;
@@ -344,7 +344,7 @@ test.describe('Transaction flows', () => {
         picked = true;
       }
     }
-    expect(picked, 'a customer with a Current account').toBeTruthy();
+    expect(picked, 'a customer with a Call / CMS account').toBeTruthy();
     await page.getByRole('button', { name: /Create draft and continue/ }).click();
     // No customer instruction or signature check: straight to Eazybankz.
     await expect(page.getByRole('heading', { name: /2\. Eazybankz/ })).toBeVisible({

@@ -52,7 +52,7 @@ export interface TxnCalcContext {
   customerPa?: Account | null;
   /** Customer's Savings account — one destination for an inflow credited to an account. */
   customerSs?: Account | null;
-  /** Customer's Current account, if they have one. */
+  /** Customer's Call / CMS (current) account, if they have one. */
   customerCa?: Account | null;
   instruction?: Instruction | null;
   banks: Bank[];
@@ -394,11 +394,10 @@ export function computeTxn(c: TxnCalcContext, baseEnv: CalcEnv): TxnComputation 
       break;
     }
 
-    case 'COT_CMS':
-    case 'COT_CALL': {
+    case 'COT_CMS': {
       // Commission on turnover, its own transaction: rate per mille × turnover ÷ 1,000, debited from the account.
-      const acc = s === 'COT_CMS' ? c.sourceAccount : null;
-      const inv = s === 'COT_CALL' ? requireInv(c) : null;
+      const acc = c.sourceAccount;
+      if (!acc) throw new Error('The Call / CMS account is required');
       const date = i.valueDate ?? c.today;
       const amtErr = validateAmount(i.amount, 'Turnover');
       if (amtErr) errors.amount = amtErr;
@@ -418,11 +417,9 @@ export function computeTxn(c: TxnCalcContext, baseEnv: CalcEnv): TxnComputation 
               value: ZERO,
               formula: on ? 'Choose the rate' : 'COT switched off for this transaction',
             };
-      if (acc && !errors.amount && gt(cot.value, acc.availableBal))
+      if (!errors.amount && gt(cot.value, acc.availableBal))
         errors.amount = `COT ${formatNaira(cot.value)} exceeds the available balance ${formatNaira(acc.availableBal)}`;
-      const where = acc
-        ? `${acc.accountNo} (Current account)`
-        : `${inv!.investmentRef} (Call placement)`;
+      const where = `${acc.accountNo} (Call / CMS account)`;
       const v = blankVoucher('CT', 1, date);
       Object.assign(v, {
         principalAmt: turnover,
@@ -434,8 +431,8 @@ export function computeTxn(c: TxnCalcContext, baseEnv: CalcEnv): TxnComputation 
             `Commission on turnover${on ? (rate ? ` at ₦${rate} per mille` : '') : ' (not charged)'} on ${where}`
         ),
         rows: [
-          info(acc ? 'Current (CMS) account' : 'Call account', where),
-          ...(acc ? [info('Available balance', acc.availableBal, 'money')] : []),
+          info('Call / CMS account', where),
+          info('Available balance', acc.availableBal, 'money'),
           money(
             'Turnover',
             { value: turnover, formula: 'Turnover the commission is charged on' },

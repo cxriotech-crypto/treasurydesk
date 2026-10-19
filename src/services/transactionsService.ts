@@ -158,7 +158,7 @@ export interface TxnDetail {
   investment: Investment | null;
   sourceAccount: Account | null;
   destAccount: Account | null;
-  /** The customer's active Personal, Savings and Current accounts (Inflow B can credit any of them). */
+  /** The customer's active Personal, Savings and Call / CMS accounts (Inflow B can credit any of them). */
   customerPa: Account | null;
   customerSs: Account | null;
   customerCa: Account | null;

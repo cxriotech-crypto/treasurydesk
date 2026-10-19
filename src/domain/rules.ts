@@ -50,8 +50,6 @@ export function investmentIneligibility(
         return 'Investment has matured – use termination or rollover';
       if (inv.effectiveDate >= today) return 'Investment starts today – nothing to pre-liquidate';
       return null;
-    case 'COT':
-      return inv.productCode === 'CALL' ? null : 'COT is charged on Call placements only';
     case 'ANNIVERSARY':
       if (inv.status !== 'ACTIVE') return 'Investment is not active';
       if (!inv.annivFreqDays || !inv.nextAnnivDate)
@@ -76,12 +74,12 @@ export function accountIneligibility(scenario: ScenarioCode, acc: Account): stri
     case 'TRANSFER_PA_CALL':
       return acc.productCode === 'PA' ? null : 'Source must be a Personal Account (PA)';
     case 'COT_CMS':
-      return acc.productCode === 'CA' ? null : 'COT is charged on Current (CMS) accounts';
+      return acc.productCode === 'CA' ? null : 'COT is charged on Call / CMS accounts';
     case 'THIRD_PARTY_EXT':
     case 'THIRD_PARTY_INT':
       return acc.productCode === 'PA' || acc.productCode === 'CA'
         ? null
-        : 'Source must be a Personal Account (PA) or a Current account (CA)';
+        : 'Source must be a Personal Account (PA) or a Call / CMS account (CA)';
     default:
       return 'This transaction does not start from an account';
   }

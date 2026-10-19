@@ -52,7 +52,6 @@ function fieldsFor(s: ScenarioCode): Key[] {
     case 'INFLOW_ACCOUNT':
       return ['amount', 'valueDate', 'creditTo', 'creditAccountNo', 'creditOther'];
     case 'COT_CMS':
-    case 'COT_CALL':
       return ['amount', 'valueDate'];
     case 'MATURITY':
     case 'PRELIQ_FULL':

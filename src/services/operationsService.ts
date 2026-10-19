@@ -126,9 +126,7 @@ function describe(db: Db, t: TreasuryTxn, v: Voucher): string[] {
         break;
       }
       out.push(
-        src
-          ? `${v.voucherNo}: debit Current account ${src.accountNo} with ${formatNaira(v.cotAmt)} commission on turnover and book it to income.`
-          : `${v.voucherNo}: post ${formatNaira(v.cotAmt)} commission on turnover against Call placement ${inv?.investmentRef} and book it to income.`
+        `${v.voucherNo}: debit Call / CMS account ${src?.accountNo} with ${formatNaira(v.cotAmt)} commission on turnover and book it to income.`
       );
       break;
     case 'TS':

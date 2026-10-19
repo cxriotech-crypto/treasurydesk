@@ -2008,8 +2008,8 @@ function applyEffects(db: Db, ctx: Ctx, t: TreasuryTxn) {
       break;
     }
     case 'INFLOW_ACCOUNT': {
-      // Personal, Savings and Current accounts are credited here; a Call or other account is posted in
-      // Eazybankz by Operations and recorded on the voucher.
+      // Personal, Savings and Call / CMS accounts are credited here; an "Other" account is posted in Eazybankz
+      // by Operations and recorded on the voucher.
       const target = t.input.creditTo;
       const acc =
         target === 'PA'
@@ -2023,14 +2023,12 @@ function applyEffects(db: Db, ctx: Ctx, t: TreasuryTxn) {
       break;
     }
     case 'COT_CMS': {
-      // The commission is debited from the Current account; a Call account's is posted in Eazybankz.
+      // The commission is debited from the Call / CMS account.
       const ct = vs.find((v) => v.voucherType === 'CT')!;
-      const acc = getById(db, 'accounts', t.sourceAccountId, 'Current account');
+      const acc = getById(db, 'accounts', t.sourceAccountId, 'Call / CMS account');
       if (isPositive(ct.cotAmt)) debit(db, acc, ct.cotAmt, 'commission on turnover');
       break;
     }
-    case 'COT_CALL':
-      break;
     case 'MATURITY':
       settlePayout(db, fo);
       closeInvestment(db, ctx, t, inv!, 'CLOSED', {

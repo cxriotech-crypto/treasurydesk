@@ -19,7 +19,7 @@ The user menu switches between the demo users in one click.
 | `npm run build` | Production build (runs ESLint + Prettier rules) |
 | `npm run test:calc` | Calculation checks from the brief (6/6 required + 12 extra, including the client's COT examples) |
 | `npm run seed:report` | Rebuilds the demo data, checks invariants, prints counts |
-| `npm run test:flow` | All 18 scenarios end to end through every role, plus the exception paths |
+| `npm run test:flow` | All 17 scenarios end to end through every role, plus the exception paths |
 | `npm run test:e2e` | Playwright: sign-in, route crawler, flows, CRUD, responsive |
 
 > Stop `npm run dev` before `npm run build` — the build overwrites the dev server's output. If the app goes blank,
@@ -27,19 +27,19 @@ The user menu switches between the demo users in one click.
 
 ## What the demo covers
 
-- **All 18 scenarios** run end to end (the 15 in the SOP, Inflow B and the two COT scenarios). The Treasury Officer prepares
+- **All 17 scenarios** run end to end (the 15 in the SOP, Inflow B and COT). The Treasury Officer prepares
   everything — instruction, signature verification, Eazybankz check and the full voucher (new rate, tenor and so
   on) — and signs. It then goes to the customer's **Account Officer**, then Head of Treasury → MIS → Internal
   Audit → MD → Operations (two officers) → Treasury confirmation. Six signatures in all.
 - **Inflow has two scenarios.** A: funds received booked as a new investment (as before). B: funds received
-  credited to an account the Treasury Officer picks — the customer's Personal Account, Savings account, Current
-  account, a Call account, or "Other" (typed in). Inflow B goes Treasury Officer → Head of Treasury → Operations
+  credited to an account the Treasury Officer picks — the customer's Personal Account, Savings account, Call / CMS
+  account, or "Other" (typed in). Inflow B goes Treasury Officer → Head of Treasury → Operations
   (two officers, the same as every other transaction) with no Account Officer call-back; the levels it skips show
-  as "not required" in the controls. Personal, Savings and Current accounts are credited when Operations' record
-  is approved; Call and other accounts are posted by Operations in Eazybankz and recorded on the voucher.
-- **Three account types**: Personal Account (PA), Savings (SS) and Current account (CA). Companies and some
-  individuals in the demo hold a Current account; third-party payments can go out of a Personal or a Current
-  account.
+  as "not required" in the controls. Personal, Savings and Call / CMS accounts are credited when Operations'
+  record is approved; an "Other" account is posted by Operations in Eazybankz and recorded on the voucher.
+- **Three account types**: Personal Account (PA), Savings (SS) and the Call / CMS account (CA) — the customer's
+  current account; Call and CMS are two names for the same account. Companies and some individuals in the demo
+  hold one; third-party payments can go out of a Personal or a Call / CMS account.
 - **One voucher per transaction.** A transaction that both pays out and rolls over — rollover B, C and D, and
   partial pre-liquidation — issues a single voucher with both parts on it under their own headings (Roll-over and
   Payout, or Pre-liquidation and Rebooking), one voucher number, one payment instruction and one set of
@@ -86,15 +86,15 @@ The user menu switches between the demo users in one click.
   entries sit at the top, and a filter shows each group. An auditor never reviews their own actions. "Verify
   integrity" is a separate, automatic check that no entry has been altered or deleted, and the page explains
   the difference.
-- **Commission on turnover (COT) is its own transaction type** (New transaction → Commission on turnover), with
-  two scenarios: A, a Current (CMS) account, and B, a Call account. It does not touch any other transaction.
+- **Commission on turnover (COT) is its own transaction type** (New transaction → Commission on turnover), on a
+  customer's Call / CMS account. It does not touch any other transaction.
   There is no customer instruction or signature check, so the wizard has three steps: account, Eazybankz,
   voucher. The Treasury Officer enters the turnover and chooses the rate — ₦2 per mille, ₦5 per mille or any
   other — and the COT Voucher shows COT = rate × turnover ÷ 1,000 (₦1,000,000 at ₦2 is ₦2,000, at ₦5 is ₦5,000).
   Like WHT and the pre-liquidation charge, COT can be switched off for the transaction; switching it off needs a
   reason, which prints on the voucher and is kept in the audit trail, and the COT is then ₦0.
   It goes Treasury Officer → Head of Treasury → Operations (two officers). On execution the COT is debited from
-  the Current account; for a Call account Operations post it in Eazybankz. COT shows in the charges report.
+  the Call / CMS account. COT shows in the charges report.
 - **Several documents everywhere.** The instruction can have several documents, a paper signature several
   pages, and every transaction has a Documents tab where anyone working on it can add supporting documents,
   several at a time (PDF, PNG or JPEG, up to 1 MB each).
@@ -175,9 +175,7 @@ every transaction themselves and take it through from the start.
 
 ### Round 3 assumptions still open (each is easy to change)
 
-- **COT on a Call account** is posted by Operations in Eazybankz and recorded on the voucher; the Call
-  placement's principal in TreasuryDesk is not changed.
-- **Inflow B** to a Call account or "Other" is posted by Operations in Eazybankz and recorded with the account
+- **Inflow B** to "Other" is posted by Operations in Eazybankz and recorded with the account
   number the officer types. Overdraft was removed, as the client asked.
 - **Paper signatures** follow the client's own process: the upload counts at once and the approver can dispute.
 - **Audit review** is done by Internal Audit (the same person as IT Audit). A flag notifies the Head of Treasury
