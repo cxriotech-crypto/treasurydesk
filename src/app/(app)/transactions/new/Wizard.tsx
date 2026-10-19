@@ -4,7 +4,13 @@ import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { ListChecks, XCircle } from 'lucide-react';
-import { scenarioLabel, SCENARIO_META, VOUCHER_TYPE_META } from '@/domain/codes';
+import {
+  APPROVAL_LEVELS,
+  chainLevels,
+  scenarioLabel,
+  SCENARIO_META,
+  VOUCHER_TYPE_META,
+} from '@/domain/codes';
 import { transactionsService } from '@/services';
 import { useData } from '@/services/useData';
 import type { TxnDetail } from '@/services/transactionsService';
@@ -139,8 +145,8 @@ export function Wizard() {
       {d?.txn.status === 'RETURNED' ? (
         <div className="mb-4">
           <InlineAlert tone="warning" title="Returned for correction">
-            {d.txn.returnComment} — correct the voucher and sign again. Approval restarts at Head,
-            Treasury.
+            {d.txn.returnComment} — correct the voucher and sign again. Approval starts again with
+            the {APPROVAL_LEVELS[chainLevels(d.txn.scenarioCode)[1] - 1].label}.
           </InlineAlert>
         </div>
       ) : null}
@@ -199,10 +205,11 @@ export function Wizard() {
             <ControlsChecklist controls={controlsList} compact />
             {d ? (
               <p className="mt-3 border-t border-border pt-3 text-xs text-muted">
-                Voucher:{' '}
-                {SCENARIO_META[d.txn.scenarioCode].vouchers
-                  .map((v) => VOUCHER_TYPE_META[v].label)
-                  .join(' + ')}
+                Voucher: {VOUCHER_TYPE_META[SCENARIO_META[d.txn.scenarioCode].vouchers[0]].label}
+                {SCENARIO_META[d.txn.scenarioCode].payout &&
+                SCENARIO_META[d.txn.scenarioCode].vouchers[0] === 'RO'
+                  ? ' with payout'
+                  : ''}
               </p>
             ) : null}
           </Card>

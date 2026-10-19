@@ -5,14 +5,19 @@ import { useRouter } from 'next/navigation';
 import { ArrowLeft, Eye, PenLine, Save } from 'lucide-react';
 import type { TxnInput } from '@/domain/types';
 import {
+  CREDIT_TARGETS,
+  CREDIT_TARGET_LABELS,
   SCENARIO_META,
   VOUCHER_TYPE_META,
+  chainLevels,
   type AnnivFreq,
+  type CreditTarget,
   type ProductCode,
   type ScenarioCode,
 } from '@/domain/codes';
 import { daysBetween } from '@/lib/dates';
 import { formatDateWithDay, formatNaira, formatRate } from '@/lib/format';
+import { isPositive } from '@/lib/money';
 import { settingsService, transactionsService } from '@/services';
 import { useCurrentUser, useData } from '@/services/useData';
 import { useDebounced } from '@/components/hooks';
@@ -26,6 +31,7 @@ import {
   Modal,
   MoneyInput,
   Select,
+  Segmented,
   SignatureModal,
   SkeletonRows,
   Switch,
@@ -43,6 +49,8 @@ function fieldsFor(s: ScenarioCode): Key[] {
   switch (s) {
     case 'INFLOW':
       return ['amount', 'newRate', 'newTenorDays', 'valueDate', 'productCode', 'annivFreqDays'];
+    case 'INFLOW_ACCOUNT':
+      return ['amount', 'valueDate', 'creditTo', 'creditAccountNo', 'creditOther'];
     case 'MATURITY':
     case 'PRELIQ_FULL':
       return ['valueDate'];
@@ -72,8 +80,15 @@ function labelFor(s: ScenarioCode, k: Key): string {
   const t = SCENARIO_META[s].txnType;
   switch (k) {
     case 'amount':
-      return s === 'INFLOW' ? 'Principal' : s === 'PRELIQ_PARTIAL' ? 'Amount requested' : 'Amount';
+      return s === 'INFLOW'
+        ? 'Principal'
+        : s === 'INFLOW_ACCOUNT'
+          ? 'Amount received'
+          : s === 'PRELIQ_PARTIAL'
+            ? 'Amount requested'
+            : 'Amount';
     case 'valueDate':
+      if (s === 'INFLOW_ACCOUNT') return 'Value date';
       return s === 'INFLOW' || (t === 'TRANSFER' && s !== 'TRANSFER_SS_PA')
         ? 'Effective / transfer date'
         : t === 'ROLLOVER'
@@ -99,6 +114,12 @@ function labelFor(s: ScenarioCode, k: Key): string {
       return 'Corrected rate';
     case 'correctedTenorDays':
       return 'Corrected tenor';
+    case 'creditTo':
+      return 'Credit to';
+    case 'creditAccountNo':
+      return 'Account number';
+    case 'creditOther':
+      return 'What it is credited to';
     default:
       return k;
   }
@@ -122,7 +143,7 @@ export function StepVoucher({ detail, goTo }: StepProps) {
   const [input, setInput] = useState<TxnInput>(txn.input);
   const [tab, setTab] = useState('0');
   const [signOpen, setSignOpen] = useState(false);
-  const [switchOff, setSwitchOff] = useState<'wht' | 'charge' | null>(null);
+  const [switchOff, setSwitchOff] = useState<'wht' | 'charge' | 'cot' | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const debounced = useDebounced(input, 150);
   const key = JSON.stringify(clean(debounced));
@@ -297,6 +318,64 @@ export function StepVoucher({ detail, goTo }: StepProps) {
             />
           </Field>
         );
+      case 'creditTo':
+        return (
+          <Field key={k} label={label} error={err} required>
+            <Select
+              value={input.creditTo ?? ''}
+              placeholder="Choose an account"
+              onChange={(e) => set('creditTo', (e.target.value || undefined) as CreditTarget)}
+              options={CREDIT_TARGETS.map((c) => {
+                const own =
+                  c === 'PA'
+                    ? detail.customerPa
+                    : c === 'SS'
+                      ? detail.customerSs
+                      : c === 'CA'
+                        ? detail.customerCa
+                        : undefined;
+                return {
+                  value: c,
+                  label: own
+                    ? `${CREDIT_TARGET_LABELS[c]} · ${own.accountNo}`
+                    : own === null
+                      ? `${CREDIT_TARGET_LABELS[c]} (none)`
+                      : CREDIT_TARGET_LABELS[c],
+                  disabled: own === null,
+                };
+              })}
+            />
+          </Field>
+        );
+      case 'creditAccountNo':
+        return input.creditTo && !['PA', 'SS', 'CA'].includes(input.creditTo) ? (
+          <Field
+            key={k}
+            label={label}
+            error={err}
+            required={input.creditTo !== 'OTHER'}
+            hint="10 digits"
+          >
+            <Input
+              inputMode="numeric"
+              value={input.creditAccountNo ?? ''}
+              onChange={(e) =>
+                set('creditAccountNo', e.target.value.replace(/\D/g, '').slice(0, 10))
+              }
+              className="num"
+            />
+          </Field>
+        ) : null;
+      case 'creditOther':
+        return input.creditTo === 'OTHER' ? (
+          <Field key={k} label={label} error={err} required className="sm:col-span-2">
+            <Input
+              value={input.creditOther ?? ''}
+              onChange={(e) => set('creditOther', e.target.value)}
+              placeholder="e.g. Loan repayment account"
+            />
+          </Field>
+        ) : null;
       case 'annivFreqDays':
         return (
           <Field key={k} label={label}>
@@ -317,22 +396,34 @@ export function StepVoucher({ detail, goTo }: StepProps) {
     }
   };
 
-  const ro = vouchers.find((v) => v.voucherType === 'RO');
-  const fo = vouchers.find((v) => v.voucherType === 'FO');
+  // The roll-over and payout parts (one voucher can carry both).
+  const ro = vouchers.find((v) => v.voucherType === 'RO' || (!!v.newRate && isPositive(v.rollAmt)));
+  const fo = vouchers.find((v) => v.voucherType === 'FO' || !!v.payment);
 
   // Switching a deduction off needs a reason, like every other exception in the app.
-  const switchOn = (which: 'wht' | 'charge') =>
+  const switchOn = (which: 'wht' | 'charge' | 'cot') =>
     setInput((i) =>
       which === 'wht'
         ? { ...i, whtOn: true, whtOffReason: undefined }
-        : { ...i, preliqChargeOn: true, preliqChargeOffReason: undefined }
+        : which === 'charge'
+          ? { ...i, preliqChargeOn: true, preliqChargeOffReason: undefined }
+          : { ...i, cotOn: true, cotOffReason: undefined }
     );
-  const confirmSwitchOff = (which: 'wht' | 'charge', reason: string) =>
+  const confirmSwitchOff = (which: 'wht' | 'charge' | 'cot', reason: string) =>
     setInput((i) =>
       which === 'wht'
         ? { ...i, whtOn: false, whtOffReason: reason.trim() }
-        : { ...i, preliqChargeOn: false, preliqChargeOffReason: reason.trim() }
+        : which === 'charge'
+          ? { ...i, preliqChargeOn: false, preliqChargeOffReason: reason.trim() }
+          : { ...i, cotOn: false, cotOffReason: reason.trim() }
     );
+
+  // Commission on turnover: where it applies, the officer chooses the rate on each transaction (₦2, ₦5 or any
+  // other per mille).
+  const cot = comp.data?.cot ?? null;
+  const cotRate = input.cotRatePerMille ?? '';
+  const [cotOther, setCotOther] = useState(false);
+  const cotChoice = cotOther || (cotRate && !['2', '5'].includes(cotRate)) ? 'OTHER' : cotRate;
 
   // Deductions this voucher carries; each can be switched off for this transaction alone.
   const hasRow = (prefix: string) =>
@@ -359,7 +450,7 @@ export function StepVoucher({ detail, goTo }: StepProps) {
             />
           </Field>
         </div>
-        {showWht || showCharge ? (
+        {showWht || showCharge || cot ? (
           <div className="mt-4 rounded-md border border-border px-3">
             {showWht ? (
               <Switch
@@ -389,6 +480,61 @@ export function StepVoucher({ detail, goTo }: StepProps) {
               <p className="pb-2 text-xs text-st-warning-fg">
                 Not applied: {input.preliqChargeOffReason}
               </p>
+            ) : null}
+            {cot ? (
+              <>
+                <Switch
+                  label="Charge commission on turnover (COT)"
+                  description={`Charged on this debit from the ${cot.scope === 'CA' ? 'Current account' : 'Call placement'}: rate × amount ÷ 1,000, deducted from what is paid out. Choose the rate below.${cot.on && isPositive(cot.amount) ? ` ${formatNaira(cot.amount)} on this transaction.` : ''}`}
+                  checked={input.cotOn !== false}
+                  onChange={(v) => (v ? switchOn('cot') : setSwitchOff('cot'))}
+                />
+                {input.cotOn !== false ? (
+                  <div className="flex flex-col gap-2 pb-3 sm:flex-row sm:items-end">
+                    <Segmented<string>
+                      label="COT rate"
+                      value={cotChoice}
+                      onChange={(v) => {
+                        setCotOther(v === 'OTHER');
+                        set('cotRatePerMille', v === 'OTHER' ? undefined : v);
+                      }}
+                      options={[
+                        { value: '2', label: '₦2 per mille' },
+                        { value: '5', label: '₦5 per mille' },
+                        { value: 'OTHER', label: 'Other' },
+                      ]}
+                    />
+                    {cotChoice === 'OTHER' ? (
+                      <Field
+                        label="Rate per mille"
+                        error={errors.cotRatePerMille}
+                        className="sm:w-40"
+                      >
+                        <Input
+                          inputMode="decimal"
+                          value={input.cotRatePerMille ?? ''}
+                          placeholder="e.g. 3.5"
+                          onChange={(e) =>
+                            set(
+                              'cotRatePerMille',
+                              e.target.value.replace(/[^\d.]/g, '') || undefined
+                            )
+                          }
+                          suffix="‰"
+                          className="num text-right"
+                        />
+                      </Field>
+                    ) : null}
+                    {errors.cotRatePerMille && cotChoice !== 'OTHER' ? (
+                      <p className="text-xs text-st-danger-fg">{errors.cotRatePerMille}</p>
+                    ) : null}
+                  </div>
+                ) : input.cotOffReason ? (
+                  <p className="pb-2 text-xs text-st-warning-fg">
+                    Not charged: {input.cotOffReason}
+                  </p>
+                ) : null}
+              </>
             ) : null}
           </div>
         ) : null}
@@ -544,25 +690,37 @@ export function StepVoucher({ detail, goTo }: StepProps) {
         title={
           switchOff === 'charge'
             ? 'Do not apply the pre-liquidation charge'
-            : 'Do not deduct withholding tax'
+            : switchOff === 'cot'
+              ? 'Do not charge commission on turnover'
+              : 'Do not deduct withholding tax'
         }
         description={
           switchOff === 'charge'
             ? 'The charge will be zero on this voucher. The reason is printed on the voucher and kept in the audit trail.'
-            : 'No withholding tax will be deducted on this voucher. The reason is printed on the voucher and kept in the audit trail.'
+            : switchOff === 'cot'
+              ? 'No COT will be deducted on this voucher. The reason is printed on the voucher and kept in the audit trail.'
+              : 'No withholding tax will be deducted on this voucher. The reason is printed on the voucher and kept in the audit trail.'
         }
-        confirmLabel={switchOff === 'charge' ? 'Switch the charge off' : 'Switch the tax off'}
+        confirmLabel={
+          switchOff === 'charge'
+            ? 'Switch the charge off'
+            : switchOff === 'cot'
+              ? 'Switch COT off'
+              : 'Switch the tax off'
+        }
         tone="danger"
         reason={{
           label: 'Reason',
           placeholder:
             switchOff === 'charge'
               ? 'e.g. Head of Treasury waived the charge — customer bereavement'
-              : 'e.g. Customer produced a valid tax exemption certificate',
+              : switchOff === 'cot'
+                ? 'e.g. COT waived for this customer by the MD'
+                : 'e.g. Customer produced a valid tax exemption certificate',
           required: true,
         }}
         onConfirm={(reason) => {
-          confirmSwitchOff(switchOff === 'charge' ? 'charge' : 'wht', reason);
+          if (switchOff) confirmSwitchOff(switchOff, reason);
           setSwitchOff(null);
         }}
       />
@@ -571,7 +729,11 @@ export function StepVoucher({ detail, goTo }: StepProps) {
         open={signOpen}
         onClose={() => setSignOpen(false)}
         title={txn.status === 'RETURNED' ? 'Sign and resubmit' : 'Sign and submit'}
-        description={`Your signature is level 1 of 6. It goes next to ${detail.accountOfficerName}, the customer's Account Officer, who calls the customer and checks it.`}
+        description={
+          chainLevels(s).includes(2)
+            ? `Your signature is level 1 of 6. It goes next to ${detail.accountOfficerName}, the customer's Account Officer, who calls the customer and checks it.`
+            : `Your signature is the first of ${chainLevels(s).length}. It goes next to the Head of Treasury, then to Operations.`
+        }
         actionLabel="Sign & submit"
         summary={
           comp.data ? (

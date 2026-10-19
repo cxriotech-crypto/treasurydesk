@@ -72,9 +72,12 @@ export function accountIneligibility(scenario: ScenarioCode, acc: Account): stri
       return acc.productCode === 'SS' ? null : 'Source must be a Savings (SS) account';
     case 'TRANSFER_PA_CP':
     case 'TRANSFER_PA_CALL':
+      return acc.productCode === 'PA' ? null : 'Source must be a Personal Account (PA)';
     case 'THIRD_PARTY_EXT':
     case 'THIRD_PARTY_INT':
-      return acc.productCode === 'PA' ? null : 'Source must be a Personal Account (PA)';
+      return acc.productCode === 'PA' || acc.productCode === 'CA'
+        ? null
+        : 'Source must be a Personal Account (PA) or a Current account (CA)';
     default:
       return 'This transaction does not start from an account';
   }
@@ -101,8 +104,7 @@ export function needsGaps(
 ): boolean {
   if (scenario === 'THIRD_PARTY_EXT') return true;
   if (scenario === 'THIRD_PARTY_INT') return false;
-  const vouchers = SCENARIO_META[scenario].vouchers;
-  if (!vouchers.includes('FO')) return false;
+  if (!SCENARIO_META[scenario].payout) return false;
   return payDestination === 'EXTERNAL';
 }
 
@@ -158,11 +160,23 @@ export function normaliseName(name: string): string {
     .replace(/^(mr|mrs|ms|miss|dr|chief|alhaji|alhaja)\.?\s+/, '');
 }
 
+/**
+ * How a signing PIN is checked. The demo accepts DEMO_PIN for everyone; the server replaces this with a check
+ * against each user's own hashed PIN (backend docs/SECURITY.md, finding F10).
+ */
+export type PinVerifier = (user: AppUser, pin: string) => boolean;
+
+let pinVerifier: PinVerifier = (_user, pin) => pin === DEMO_PIN;
+
+export function setPinVerifier(fn: PinVerifier): void {
+  pinVerifier = fn;
+}
+
 export function signatureMatches(user: AppUser, name: string, pin: string): string | null {
   if (!name.trim()) return 'Type your full name to sign';
   if (normaliseName(name) !== normaliseName(user.fullName))
     return 'Name does not match your user profile';
-  if (pin !== DEMO_PIN) return 'Incorrect PIN';
+  if (!pinVerifier(user, pin)) return 'Incorrect PIN';
   return null;
 }
 

@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { collectConsoleErrors, fastDemo, login, sign, switchTo } from './helpers';
+import { collectConsoleErrors, fastDemo, login, sign, switchTo, switchToName } from './helpers';
 
 const pdf = (name: string) => ({
   name,
@@ -108,12 +108,22 @@ test.describe('Client corrections', () => {
       .setInputFiles([pdf('signed-page-1.pdf'), pdf('signed-page-2.pdf')]);
     await expect(dlg.getByText('signed-page-2.pdf')).toBeVisible();
     await dlg.getByRole('button', { name: 'Record signature' }).click();
-    await expect(page.getByText('Awaiting MIS', { exact: true }).first()).toBeVisible({
+    // On to the next level of its route (MIS, or Operations for an inflow credited to an account).
+    await expect(page.getByText(/^(Awaiting MIS|Ready for Operations)$/).first()).toBeVisible({
       timeout: 20_000,
     });
     await page.getByRole('tab', { name: /Documents/ }).click();
     await expect(page.getByText('Paper signatures')).toBeVisible();
     await expect(page.getByText('signed-page-1.pdf')).toBeVisible();
+
+    // The approver named on it is told, and confirms it (or could dispute it).
+    await switchToName(page, 'Ibrahim Musa');
+    const banner = page.getByText('Signed on paper in your name');
+    await expect(banner).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByRole('button', { name: 'I did not sign it' })).toBeVisible();
+    await page.getByRole('button', { name: 'Yes, I signed it' }).click();
+    await expect(page.getByText('Paper signature confirmed')).toBeVisible({ timeout: 20_000 });
+    await expect(banner).toBeHidden();
   });
 
   test('several supporting documents can be added at once', async ({ page }) => {

@@ -148,18 +148,27 @@ export function PrintVoucher() {
           ) : null}
 
           <section className="mt-3 border border-zinc-900">
-            {v.rows.map((r, i) => (
-              <div
-                key={`${r.label}-${i}`}
-                className={`grid grid-cols-[1fr_auto] ${i ? 'border-t border-zinc-300' : ''} ${r.kind === 'total' ? 'bg-zinc-100 font-bold' : ''}`}
-              >
-                <p className="px-2 py-1">
+            {v.rows.map((r, i) =>
+              r.kind === 'section' ? (
+                <p
+                  key={`${r.label}-${i}`}
+                  className={`bg-zinc-200 px-2 py-1 text-[9px] font-bold uppercase tracking-wide ${i ? 'border-t border-zinc-900' : ''}`}
+                >
                   {r.label}
-                  {r.note ? <span className="block text-[9px] italic">{r.note}</span> : null}
                 </p>
-                <p className="num px-2 py-1 text-right">{formatRowValue(r)}</p>
-              </div>
-            ))}
+              ) : (
+                <div
+                  key={`${r.label}-${i}`}
+                  className={`grid grid-cols-[1fr_auto] ${i ? 'border-t border-zinc-300' : ''} ${r.kind === 'total' ? 'bg-zinc-100 font-bold' : ''}`}
+                >
+                  <p className="px-2 py-1">
+                    {r.label}
+                    {r.note ? <span className="block text-[9px] italic">{r.note}</span> : null}
+                  </p>
+                  <p className="num px-2 py-1 text-right">{formatRowValue(r)}</p>
+                </div>
+              )
+            )}
           </section>
 
           <section className="mt-3 border border-zinc-900 p-2">
@@ -206,7 +215,10 @@ export function PrintVoucher() {
             ) : null}
           </section>
 
-          <section className="mt-3 grid grid-cols-6 border border-zinc-900">
+          <section
+            className="mt-3 grid border border-zinc-900"
+            style={{ gridTemplateColumns: `repeat(${p.signatures.length}, minmax(0, 1fr))` }}
+          >
             {p.signatures.map((s, i) => (
               <div
                 key={s.levelNo}
@@ -240,7 +252,7 @@ export function PrintVoucher() {
                 p.execution?.gapsRef ?? (p.execution ? 'Internal – not applicable' : '—'),
               ],
               [
-                'Keyed / approved (Operations)',
+                'Recorded / approved (Operations)',
                 p.execution
                   ? `${p.execution.executedByName} / ${p.execution.approvedByName ?? '—'}`
                   : 'Pending',

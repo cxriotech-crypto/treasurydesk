@@ -67,6 +67,15 @@ export function VoucherView({ v, showTitle = true }: { v: VoucherLike; showTitle
       ) : null}
       <div className="divide-y divide-border overflow-hidden rounded-md border border-border">
         {v.rows.map((r, i) => {
+          if (r.kind === 'section')
+            return (
+              <p
+                key={`${r.label}-${i}`}
+                className="bg-surface-2 px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-muted"
+              >
+                {r.label}
+              </p>
+            );
           const calc = r.kind === 'calc' || r.kind === 'total';
           return (
             <div

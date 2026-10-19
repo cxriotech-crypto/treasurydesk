@@ -10,6 +10,7 @@ import type {
   Execution,
   Instruction,
   Investment,
+  PaperSignature,
   ListQuery,
   ListResult,
   RecallDecision,
@@ -23,7 +24,6 @@ import type {
 } from '@/domain/types';
 import {
   CONTROL_LABELS,
-  RECALLABLE_STATUSES,
   ROLE_LABELS,
   TXN_STATUSES,
   TXN_STATUS_META,
@@ -34,7 +34,6 @@ import {
   type TxnType,
 } from '@/domain/codes';
 import { reversalIneligibility, slaState, type SlaState } from '@/domain/rules';
-import { accruedInterest } from '@/lib/calc';
 import { isoDatePart, nowIso, todayLagos } from '@/lib/dates';
 import { add, gte, lte } from '@/lib/money';
 import type { Db } from '@/data/db';
@@ -43,6 +42,7 @@ import { AppError, findById, getById, matchesSearch, paginate } from '@/data/rep
 import { USE_MOCK, ctx, http, requireUser, run, runNow, sessionUser } from './core';
 import { canSeeCustomer, visibleCustomerIds } from './scope';
 import * as wf from './workflow';
+import { ports, type CbsSnapshotData } from './ports';
 import type { TxnComputation } from './voucherBuilder';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -92,7 +92,7 @@ export interface TxnActions {
   approveReady: string | null;
   /** Operations, first officer: key the posting. */
   execute: string | null;
-  /** Operations, second officer: approve the keyed posting. */
+  /** Operations, second officer: approve the payment record. */
   opsApprove: string | null;
   confirm: string | null;
   reverse: string | null;
@@ -142,6 +142,13 @@ export interface NamedAudit extends AuditEvent {
   userName: string;
 }
 
+export interface NamedPaperSignature extends PaperSignature {
+  signedByName: string;
+  recordedByName: string;
+  /** The signed-in user is the approver named on it. */
+  mine: boolean;
+}
+
 export interface TxnDetail {
   txn: TreasuryTxn;
   customer: Customer;
@@ -151,6 +158,10 @@ export interface TxnDetail {
   investment: Investment | null;
   sourceAccount: Account | null;
   destAccount: Account | null;
+  /** The customer's active Personal, Savings and Current accounts (Inflow B can credit any of them). */
+  customerPa: Account | null;
+  customerSs: Account | null;
+  customerCa: Account | null;
   instruction: Instruction | null;
   verification: Verification | null;
   callbacks: NamedCallback[];
@@ -166,6 +177,10 @@ export interface TxnDetail {
   auditVerified: boolean;
   /** People who can be named on a paper signature for the level now waiting. */
   paperSigners: { id: string; fullName: string }[];
+  /** Every paper signature recorded on this transaction, newest first. */
+  paperSignatures: NamedPaperSignature[];
+  /** Paper signatures in the signed-in user's name that they have not confirmed or disputed yet. */
+  myOpenPaper: NamedPaperSignature[];
   audit: NamedAudit[];
   reversalOf: Pick<TreasuryTxn, 'id' | 'txnRef'> | null;
   reversedBy: Pick<TreasuryTxn, 'id' | 'txnRef'> | null;
@@ -190,6 +205,89 @@ export interface ReversibleTxn {
   disabledReason: string | null;
 }
 
+/** What the maker confirms after reading the Eazybankz figures. */
+export type CbsAttestation = Omit<wf.CbsConfirmation, 'cbsSyncedAt' | 'evidence'>;
+
+/** Ask Eazybankz (through the core-banking port) for the figures behind a transaction. */
+async function cbsSnapshotFor(id: string): Promise<CbsSnapshotData> {
+  const req = await run(() => {
+    requireUser();
+    const db = getDb();
+    const t = getById(db, 'txns', id, 'transaction');
+    if (!canSeeCustomer(t.customerId))
+      throw new AppError('The transaction could not be found.', 'NOT_FOUND');
+    const inv = findById(db, 'investments', t.investmentId);
+    const src = findById(db, 'accounts', t.sourceAccountId);
+    const pa = db.accounts.find((a) => a.customerId === t.customerId && a.productCode === 'PA');
+    return {
+      investmentRef: inv?.investmentRef ?? null,
+      sourceAccountNo: src?.accountNo ?? null,
+      paAccountNo: src ? null : (pa?.accountNo ?? null),
+      asOf: todayLagos(),
+    };
+  });
+  return ports().coreBanking.snapshot(req);
+}
+
+function toSnapshot(d: CbsSnapshotData): CbsSnapshot {
+  const lines: CbsSnapshot['lines'] = [];
+  if (d.investment) {
+    const i = d.investment;
+    lines.push(
+      { label: 'Investment', value: i.investmentRef, format: 'text' },
+      { label: 'Principal', value: i.principalAmt, format: 'money' },
+      { label: 'Accrued interest to today', value: i.accruedInterest, format: 'money' },
+      { label: 'Interest rate', value: i.intRate, format: 'rate' },
+      { label: 'Effective date', value: i.effectiveDate, format: 'date' },
+      { label: 'Maturity date', value: i.maturityDate, format: 'date' },
+      {
+        label: 'Outstanding balance',
+        value: add(i.principalAmt, i.accruedInterest),
+        format: 'money',
+      },
+      { label: 'Available amount', value: i.availableAmt, format: 'money' }
+    );
+  }
+  if (d.sourceAccount) {
+    lines.push(
+      {
+        label: `Source account (${d.sourceAccount.productCode})`,
+        value: d.sourceAccount.accountNo,
+        format: 'text',
+      },
+      { label: 'Ledger balance', value: d.sourceAccount.ledgerBal, format: 'money' },
+      { label: 'Available balance', value: d.sourceAccount.availableBal, format: 'money' }
+    );
+  }
+  if (!d.sourceAccount && d.pa) {
+    lines.push(
+      { label: 'Personal Account (PA)', value: d.pa.accountNo, format: 'text' },
+      { label: 'PA available balance', value: d.pa.availableBal, format: 'money' }
+    );
+  }
+  return { syncedAt: d.syncedAt, lines };
+}
+
+/** The figures recorded in the audit trail with the maker's confirmation. */
+function snapshotEvidence(d: CbsSnapshotData): Record<string, string> {
+  const e: Record<string, string> = { syncedAt: d.syncedAt };
+  if (d.investment) {
+    e.investmentRef = d.investment.investmentRef;
+    e.principalAmt = d.investment.principalAmt;
+    e.accruedInterest = d.investment.accruedInterest;
+    e.availableAmt = d.investment.availableAmt;
+  }
+  if (d.sourceAccount) {
+    e.sourceAccountNo = d.sourceAccount.accountNo;
+    e.sourceAvailableBal = d.sourceAccount.availableBal;
+  }
+  if (d.pa) {
+    e.paAccountNo = d.pa.accountNo;
+    e.paAvailableBal = d.pa.availableBal;
+  }
+  return e;
+}
+
 export interface CbsSnapshot {
   syncedAt: string;
   lines: { label: string; value: string; format: 'money' | 'date' | 'rate' | 'days' | 'text' }[];
@@ -210,7 +308,8 @@ export interface TransactionsService {
   logCallback(id: string, data: wf.CallbackData): Promise<CallbackLog>;
   /** Simulated "Refresh from Eazybankz" (~1 s). */
   refreshFromCbs(id: string): Promise<CbsSnapshot>;
-  confirmCbs(id: string, data: wf.CbsConfirmation): Promise<TreasuryTxn>;
+  /** The maker's confirmation; the Eazybankz figures and sync time are fetched by the service itself. */
+  confirmCbs(id: string, data: CbsAttestation): Promise<TreasuryTxn>;
   signAndSubmit(id: string, sign: wf.SignArgs, version?: number): Promise<TreasuryTxn>;
   auditVerify(id: string, checks: wf.SignatureChecks): Promise<TreasuryTxn>;
   recordPaperApproval(
@@ -218,6 +317,10 @@ export interface TransactionsService {
     args: wf.PaperApprovalArgs,
     version?: number
   ): Promise<TreasuryTxn>;
+  /** The approver named on a paper signature confirms it is theirs. */
+  confirmPaperSignature(paperId: string): Promise<TreasuryTxn>;
+  /** The approver named on a paper signature says they did not sign it (sent back to them if not yet paid). */
+  disputePaperSignature(paperId: string, reason: string): Promise<TreasuryTxn>;
   recall(id: string, reason: string, version?: number): Promise<TreasuryTxn>;
   requestRecall(id: string, reason: string): Promise<RecallRequest>;
   decideRecall(
@@ -304,26 +407,28 @@ function stagesOf(db: Db, t: TreasuryTxn): Stage[] {
   ];
   let currentSet = false;
   const closed = ['COMPLETED', 'CANCELLED', 'REJECTED', 'STOPPED'].includes(t.status);
-  return defs.map(([key, label, code]) => {
-    const c = ctl(code);
-    let state: StageState;
-    if (key === 'confirmed' && t.status === 'COMPLETED') state = 'done';
-    else if (c.state === 'PASSED') state = 'done';
-    else if (c.state === 'FAILED') state = 'failed';
-    else if (!currentSet && !closed) {
-      state = 'current';
-      currentSet = true;
-    } else state = 'todo';
-    if (key === 'ops' && t.status === 'EXEC_FAILED') state = 'failed';
-    const at = key === 'confirmed' ? t.completedAt : c.actedAt;
-    return {
-      key,
-      label,
-      state,
-      at: state === 'done' || state === 'failed' ? at : null,
-      by: state === 'done' || state === 'failed' ? userName(db, c.actedBy) : null,
-    };
-  });
+  return defs
+    .filter(([, , code]) => ctl(code).state !== 'NOT_REQUIRED')
+    .map(([key, label, code]) => {
+      const c = ctl(code);
+      let state: StageState;
+      if (key === 'confirmed' && t.status === 'COMPLETED') state = 'done';
+      else if (c.state === 'PASSED') state = 'done';
+      else if (c.state === 'FAILED') state = 'failed';
+      else if (!currentSet && !closed) {
+        state = 'current';
+        currentSet = true;
+      } else state = 'todo';
+      if (key === 'ops' && t.status === 'EXEC_FAILED') state = 'failed';
+      const at = key === 'confirmed' ? t.completedAt : c.actedAt;
+      return {
+        key,
+        label,
+        state,
+        at: state === 'done' || state === 'failed' ? at : null,
+        by: state === 'done' || state === 'failed' ? userName(db, c.actedBy) : null,
+      };
+    });
 }
 
 export function actionsFor(db: Db, t: TreasuryTxn, u: AppUser | null): TxnActions {
@@ -358,8 +463,6 @@ export function actionsFor(db: Db, t: TreasuryTxn, u: AppUser | null): TxnAction
         : ok
           ? null
           : stateWhy;
-  const c = (code: ControlCode) =>
-    db.controls.find((x) => x.txnId === t.id && x.controlCode === code)?.state;
   const origin = t.resultInvestmentId
     ? findById(db, 'investments', t.resultInvestmentId)
     : undefined;
@@ -377,7 +480,7 @@ export function actionsFor(db: Db, t: TreasuryTxn, u: AppUser | null): TxnAction
 
   const level = levelForStatus(t.status);
   const approveWho = wf.approvalBlocker(db, t, u);
-  const recallable = RECALLABLE_STATUSES.includes(t.status);
+  const recallWhy = wf.recallBlocker(db, t);
   const pendingMine = db.recalls.some(
     (r) => r.txnId === t.id && r.requestedBy === u.id && r.status === 'PENDING'
   );
@@ -393,7 +496,7 @@ export function actionsFor(db: Db, t: TreasuryTxn, u: AppUser | null): TxnAction
     approveReady: approveWho ? null : wf.approveRequirement(db, t),
     execute:
       u.roleCode !== 'OPS'
-        ? 'Only Operations can key a posting'
+        ? 'Only Operations record a payment'
         : !['PENDING_OPERATIONS', 'EXEC_FAILED'].includes(t.status)
           ? 'Not ready for Operations'
           : isMaker
@@ -430,13 +533,13 @@ export function actionsFor(db: Db, t: TreasuryTxn, u: AppUser | null): TxnAction
             ? 'Already verified in this round'
             : null,
     paperSign: makerOnly(!!level, 'Nothing is waiting for an approver'),
-    recall: makerOnly(recallable, 'Only submitted transactions not yet executed can be recalled'),
+    recall: makerOnly(!recallWhy, recallWhy ?? ''),
     requestRecall: isMaker
       ? 'You created this transaction — recall it yourself'
       : !['AO', 'HT', 'MIS', 'AUD', 'MD', 'OPS'].includes(u.roleCode)
         ? 'Your role cannot request a recall'
-        : !recallable
-          ? 'Only submitted transactions not yet executed can be recalled'
+        : recallWhy
+          ? recallWhy
           : pendingMine
             ? 'You have already asked for a recall'
             : null,
@@ -446,6 +549,15 @@ export function actionsFor(db: Db, t: TreasuryTxn, u: AppUser | null): TxnAction
         : u.roleCode === 'AO' && cust?.accountOfficerId !== u.id
           ? 'Not your customer'
           : null,
+  };
+}
+
+function namedPaper(db: Db, p: PaperSignature, u: AppUser | null): NamedPaperSignature {
+  return {
+    ...p,
+    signedByName: userName(db, p.signedBy),
+    recordedByName: userName(db, p.recordedBy),
+    mine: !!u && p.signedBy === u.id,
   };
 }
 
@@ -460,6 +572,7 @@ function relatedIds(db: Db, t: TreasuryTxn): Set<string> {
     'vouchers',
     'attachments',
     'recalls',
+    'paperSignatures',
   ] as const) {
     for (const r of db[table] as { id: string; txnId: string }[])
       if (r.txnId === t.id) ids.add(r.id);
@@ -504,6 +617,18 @@ function detail(db: Db, id: string): TxnDetail {
     investment: findById(db, 'investments', t.investmentId) ?? null,
     sourceAccount: findById(db, 'accounts', t.sourceAccountId) ?? null,
     destAccount: findById(db, 'accounts', t.destAccountId) ?? null,
+    customerPa:
+      db.accounts.find(
+        (a) => a.customerId === t.customerId && a.productCode === 'PA' && a.status === 'ACTIVE'
+      ) ?? null,
+    customerSs:
+      db.accounts.find(
+        (a) => a.customerId === t.customerId && a.productCode === 'SS' && a.status === 'ACTIVE'
+      ) ?? null,
+    customerCa:
+      db.accounts.find(
+        (a) => a.customerId === t.customerId && a.productCode === 'CA' && a.status === 'ACTIVE'
+      ) ?? null,
     instruction: db.instructions.find((i) => i.txnId === t.id) ?? null,
     verification: db.verifications.find((v) => v.txnId === t.id) ?? null,
     callbacks: db.callbacks
@@ -533,17 +658,23 @@ function detail(db: Db, id: string): TxnDetail {
         actorName: c.actedBy ? userName(db, c.actedBy) : null,
       })),
     comments: db.comments
-      .filter((c) => c.txnId === t.id)
+      // Deleted comments are kept; only Internal Audit still sees them (marked deleted).
+      .filter((c) => c.txnId === t.id && (!c.deletedAt || u?.roleCode === 'AUD'))
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
       .map((c) => ({ ...c, userName: userName(db, c.userId), mine: !!u && c.userId === u.id })),
     attachments: db.attachments
-      .filter((a) => a.txnId === t.id)
+      .filter((a) => a.txnId === t.id && (!a.deletedAt || u?.roleCode === 'AUD'))
       .sort((a, b) => a.uploadedAt.localeCompare(b.uploadedAt))
       .map((a) => ({
         ...a,
         uploadedByName: userName(db, a.uploadedBy),
         mine: !!u && a.uploadedBy === u.id,
       })),
+    paperSignatures: db.paperSignatures
+      .filter((p) => p.txnId === t.id)
+      .sort((a, b) => b.recordedAt.localeCompare(a.recordedAt))
+      .map((p) => namedPaper(db, p, u)),
+    myOpenPaper: u ? wf.openPaperSignatures(db, t, u).map((p) => namedPaper(db, p, u)) : [],
     recalls: db.recalls
       .filter((r) => r.txnId === t.id)
       .sort((a, b) => b.requestedAt.localeCompare(a.requestedAt))
@@ -658,57 +789,26 @@ export const mockTransactionsService: TransactionsService = {
   stop: (id, reason) => run(() => wf.stopForSignatureMismatch(ctx(['TO']), id, reason)),
   logCallback: (id, data) => run(() => wf.logCallback(ctx(['AO']), id, data)),
 
-  refreshFromCbs: (id) =>
-    run(() => {
-      requireUser();
-      const db = getDb();
-      const t = getById(db, 'txns', id, 'transaction');
-      const asOf = todayLagos();
-      const lines: CbsSnapshot['lines'] = [];
-      const inv = findById(db, 'investments', t.investmentId);
-      if (inv) {
-        const ai = accruedInterest(inv, asOf, db.settings.values);
-        lines.push(
-          { label: 'Investment', value: inv.investmentRef, format: 'text' },
-          { label: 'Principal', value: inv.principalAmt, format: 'money' },
-          { label: 'Accrued interest to today', value: ai.value, format: 'money' },
-          { label: 'Interest rate', value: inv.intRate, format: 'rate' },
-          { label: 'Effective date', value: inv.effectiveDate, format: 'date' },
-          { label: 'Maturity date', value: inv.maturityDate, format: 'date' },
-          { label: 'Outstanding balance', value: add(inv.principalAmt, ai.value), format: 'money' },
-          {
-            label: 'Available amount',
-            value:
-              inv.status === 'MATURED' || inv.maturityDate <= asOf
-                ? add(inv.principalAmt, ai.value)
-                : inv.principalAmt,
-            format: 'money',
-          }
-        );
-      }
-      const src = findById(db, 'accounts', t.sourceAccountId);
-      if (src) {
-        lines.push(
-          { label: `Source account (${src.productCode})`, value: src.accountNo, format: 'text' },
-          { label: 'Ledger balance', value: src.ledgerBal, format: 'money' },
-          { label: 'Available balance', value: src.availableBal, format: 'money' }
-        );
-      }
-      const pa = db.accounts.find((a) => a.customerId === t.customerId && a.productCode === 'PA');
-      if (!src && pa) {
-        lines.push(
-          { label: 'Personal Account (PA)', value: pa.accountNo, format: 'text' },
-          { label: 'PA available balance', value: pa.availableBal, format: 'money' }
-        );
-      }
-      return { syncedAt: nowIso(), lines };
-    }, 1000),
+  refreshFromCbs: async (id) => toSnapshot(await cbsSnapshotFor(id)),
 
-  confirmCbs: (id, data) => run(() => wf.confirmCbs(ctx(['TO']), id, data)),
+  // The Eazybankz figures and sync time come from the core banking system, never from the browser.
+  confirmCbs: async (id, data) => {
+    const snap = await cbsSnapshotFor(id);
+    return run(() =>
+      wf.confirmCbs(ctx(['TO']), id, {
+        ...data,
+        cbsSyncedAt: snap.syncedAt,
+        evidence: snapshotEvidence(snap),
+      })
+    );
+  },
   signAndSubmit: (id, sign, version) => run(() => wf.signAndSubmit(ctx(['TO']), id, sign, version)),
   auditVerify: (id, checks) => run(() => wf.auditVerify(ctx(['AUD']), id, checks)),
   recordPaperApproval: (id, args, version) =>
     run(() => wf.recordPaperApproval(ctx(['TO']), id, args, version)),
+  confirmPaperSignature: (paperId) => run(() => wf.confirmPaperSignature(ctx(), paperId)),
+  disputePaperSignature: (paperId, reason) =>
+    run(() => wf.disputePaperSignature(ctx(), paperId, reason)),
   recall: (id, reason, version) => run(() => wf.recall(ctx(['TO']), id, reason, version)),
   requestRecall: (id, reason) => run(() => wf.requestRecall(ctx(), id, reason)),
   decideRecall: (requestId, decision, note) =>
@@ -748,6 +848,9 @@ export const httpTransactionsService: TransactionsService = {
   auditVerify: (id, checks) => http.post(`/transactions/${id}/audit-verification`, checks),
   recordPaperApproval: (id, args, version) =>
     http.post(`/transactions/${id}/paper-approval`, { ...args, version }),
+  confirmPaperSignature: (paperId) => http.post(`/paper-signatures/${paperId}/confirm`),
+  disputePaperSignature: (paperId, reason) =>
+    http.post(`/paper-signatures/${paperId}/dispute`, { reason }),
   recall: (id, reason, version) => http.post(`/transactions/${id}/recall`, { reason, version }),
   requestRecall: (id, reason) => http.post(`/transactions/${id}/recall-requests`, { reason }),
   decideRecall: (requestId, decision, note) =>

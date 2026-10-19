@@ -1,5 +1,5 @@
 import type { Customer, Execution, Instruction, TreasuryTxn, Voucher } from '@/domain/types';
-import { APPROVAL_LEVELS, VOUCHER_TYPE_META } from '@/domain/codes';
+import { APPROVAL_LEVELS, VOUCHER_TYPE_META, chainLevels } from '@/domain/codes';
 import { COMPANY_NAME } from '@/domain/rules';
 import { accruedInterest } from '@/lib/calc';
 import { todayLagos } from '@/lib/dates';
@@ -22,7 +22,13 @@ export interface SignatureBox {
 export interface PrintableVoucher {
   companyName: string;
   title: string;
-  voucher: Omit<Voucher, 'id' | 'version' | 'txnId' | 'createdAt'> & { id: string | null };
+  /** A saved voucher (all fields) or a draft (id null, not yet saved). */
+  voucher: Omit<Voucher, 'id' | 'version' | 'txnId' | 'createdAt'> & {
+    id: string | null;
+    version?: number;
+    txnId?: string;
+    createdAt?: string;
+  };
   txn: Pick<TreasuryTxn, 'id' | 'txnRef' | 'status' | 'scenarioCode' | 'cycleNo'>;
   customer: Pick<Customer, 'customerName' | 'cifNo' | 'address'>;
   instruction: Pick<Instruction, 'channel' | 'receivedDate' | 'purpose'> | null;
@@ -107,17 +113,19 @@ function assemble(
       : null,
     headlineAmount: amt,
     amountInWords: amountInWords(amt),
-    signatures: APPROVAL_LEVELS.map((l) => {
-      const a = isDraft ? undefined : approvals.find((x) => x.levelNo === l.levelNo);
-      return {
-        levelNo: l.levelNo,
-        roleLabel: l.label,
-        signerName: a
-          ? `${userName(db, a.userId)}${a.channel === 'PAPER' ? ' (signed on paper)' : ''}`
-          : null,
-        signedAt: a?.actedAt ?? null,
-      };
-    }),
+    signatures: APPROVAL_LEVELS.filter((l) => chainLevels(t.scenarioCode).includes(l.levelNo)).map(
+      (l) => {
+        const a = isDraft ? undefined : approvals.find((x) => x.levelNo === l.levelNo);
+        return {
+          levelNo: l.levelNo,
+          roleLabel: l.label,
+          signerName: a
+            ? `${userName(db, a.userId)}${a.channel === 'PAPER' ? ' (signed on paper)' : ''}`
+            : null,
+          signedAt: a?.actedAt ?? null,
+        };
+      }
+    ),
     execution:
       ex && !isDraft
         ? {

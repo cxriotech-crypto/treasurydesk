@@ -11,7 +11,9 @@ import type {
   Approval,
   Attachment,
   AttachmentKind,
+  AuditReviewStatus,
   CallbackLog,
+  Execution,
   ImportBatch,
   ImportRegister,
   ControlCheck,
@@ -27,7 +29,9 @@ import type {
   Voucher,
 } from '@/domain/types';
 import {
+  type AccountProductCode,
   APPROVAL_LEVELS,
+  chainLevels,
   CLOSED_STATUSES,
   CONTROL_CODES,
   CONTROL_LABELS,
@@ -111,6 +115,14 @@ function txnOf(db: Db, txnId: string, version?: number): TreasuryTxn {
     );
   }
   return t;
+}
+
+/** Account Officers work only on their own customers (backend docs/SECURITY.md, finding F15). */
+function requireCustomerScope(db: Db, u: AppUser, customerId: string, label = 'transaction') {
+  if (u.roleCode !== 'AO') return;
+  const c = findById(db, 'customers', customerId);
+  if (c?.accountOfficerId !== u.id)
+    throw new AppError(`The ${label} could not be found.`, 'NOT_FOUND');
 }
 
 function requireStatus(t: TreasuryTxn, allowed: TxnStatus[]) {
@@ -198,6 +210,18 @@ function customerPa(db: Db, customerId: string): Account | undefined {
   );
 }
 
+function customerSs(db: Db, customerId: string): Account | undefined {
+  return db.accounts.find(
+    (a) => a.customerId === customerId && a.productCode === 'SS' && a.status === 'ACTIVE'
+  );
+}
+
+function customerCa(db: Db, customerId: string): Account | undefined {
+  return db.accounts.find(
+    (a) => a.customerId === customerId && a.productCode === 'CA' && a.status === 'ACTIVE'
+  );
+}
+
 function accountByNo(db: Db, accountNo: string | null | undefined): Account | undefined {
   if (!accountNo) return undefined;
   return db.accounts.find((a) => a.accountNo === accountNo);
@@ -237,6 +261,8 @@ export function buildCalcContext(
         : (findById(db, 'investments', t.investmentId) ?? null),
     sourceAccount: findById(db, 'accounts', t.sourceAccountId) ?? null,
     customerPa: customerPa(db, t.customerId) ?? null,
+    customerSs: customerSs(db, t.customerId) ?? null,
+    customerCa: customerCa(db, t.customerId) ?? null,
     instruction,
     banks: db.banks,
     originalInvestment: originalTxn
@@ -392,14 +418,16 @@ export function createDraft(ctx: Ctx, a: CreateDraftArgs): TreasuryTxn {
       auditVerifiedAt: null,
       auditCycleNo: null,
     });
+    const skipped = skippedControls(a.scenarioCode);
     for (const code of CONTROL_CODES) {
+      const na = skipped.includes(code);
       insert(db, 'controls', {
         txnId: t.id,
         controlCode: code,
-        state: 'PENDING',
+        state: na ? 'NOT_REQUIRED' : 'PENDING',
         actedBy: null,
         actedAt: null,
-        note: null,
+        note: na ? 'Not required on this route' : null,
       });
     }
     writeAudit(db, ctx, {
@@ -503,18 +531,22 @@ function insertAttachment(
   t: TreasuryTxn,
   kind: AttachmentKind,
   f: AttachmentInput,
-  approvalId: string | null = null
+  approvalId: string | null = null,
+  paperSignatureId: string | null = null
 ) {
   return insert(db, 'attachments', {
     txnId: t.id,
     kind,
     approvalId,
+    paperSignatureId,
     fileName: f.fileName,
     mimeType: f.mimeType,
     sizeBytes: f.sizeBytes,
     dataUrl: f.dataUrl,
     uploadedBy: ctx.userId,
     uploadedAt: ctx.at,
+    deletedAt: null,
+    deletedBy: null,
   });
 }
 
@@ -530,7 +562,7 @@ export function recordInstruction(ctx: Ctx, txnId: string, data: InstructionData
     if (documents) checkAttachments(documents, false);
     if (t.scenarioCode === 'THIRD_PARTY_EXT') d.payDestination = 'EXTERNAL';
     if (t.scenarioCode === 'THIRD_PARTY_INT') d.payDestination = 'INTERNAL';
-    if (!SCENARIO_META[t.scenarioCode].vouchers.includes('FO')) d.payDestination = 'INTERNAL';
+    if (!SCENARIO_META[t.scenarioCode].payout) d.payDestination = 'INTERNAL';
     if (!isIsoDate(d.receivedDate)) errors.receivedDate = 'Date received is required';
     if (!/^\d{2}:\d{2}$/.test(d.receivedTime)) errors.receivedTime = 'Time received is required';
     if (!isValidMoney(d.amount) || !isPositive(d.amount))
@@ -795,9 +827,12 @@ export function logCallback(ctx: Ctx, txnId: string, data: CallbackData): Callba
 }
 
 export interface CbsConfirmation {
+  /** When Eazybankz was read — supplied by the service from the core-banking port, never by the browser. */
   cbsSyncedAt: string;
   fundsReceived?: boolean;
   sourceConfirmed?: boolean;
+  /** The Eazybankz figures the maker confirmed, recorded in the audit trail. */
+  evidence?: Record<string, string>;
 }
 
 export function confirmCbs(ctx: Ctx, txnId: string, data: CbsConfirmation): TreasuryTxn {
@@ -808,7 +843,10 @@ export function confirmCbs(ctx: Ctx, txnId: string, data: CbsConfirmation): Trea
     requireStatus(t, ['VERIFICATION', 'RETURNED']);
     // C03 (customer call-back) is recorded but does not block: see CHANGES.md.
     requireControls(db, t.id, ['C01', 'C02']);
-    if (t.scenarioCode === 'INFLOW' && (!data.fundsReceived || !data.sourceConfirmed)) {
+    if (
+      SCENARIO_META[t.scenarioCode].txnType === 'INFLOW' &&
+      (!data.fundsReceived || !data.sourceConfirmed)
+    ) {
       throw new AppError(
         'Confirm that funds were received and the source account is confirmed.',
         'VALIDATION'
@@ -827,7 +865,7 @@ export function confirmCbs(ctx: Ctx, txnId: string, data: CbsConfirmation): Trea
       action: 'CBS_CONFIRMED',
       summary: `${t.txnRef}: confirmed in Eazybankz`,
       before,
-      after,
+      after: data.evidence ? { ...after, eazybankz: data.evidence } : after,
     });
     setControl(
       db,
@@ -886,6 +924,20 @@ function liveApprovals(db: Db, t: TreasuryTxn): Approval[] {
 /** Approval controls, cleared when a transaction starts the chain again. */
 const CHAIN_CONTROLS: ControlCode[] = ['C03', 'C06', 'C07', 'C08', 'C09', 'C10'];
 
+/** The approval controls of levels this scenario's route leaves out. */
+export function skippedControls(s: ScenarioCode): ControlCode[] {
+  const levels = chainLevels(s);
+  return APPROVAL_LEVELS.filter((l) => !levels.includes(l.levelNo)).map(
+    (l) => l.control as ControlCode
+  );
+}
+
+/** The status waiting after `levelNo` has signed: the next level on this scenario's route, or Operations. */
+function statusAfterLevel(s: ScenarioCode, levelNo: number): TxnStatus {
+  const next = chainLevels(s).find((l) => l > levelNo);
+  return next ? APPROVAL_LEVELS[next - 1].pendingStatus! : 'PENDING_OPERATIONS';
+}
+
 /** Everything signAndSubmit checks before signing, without writing anything. */
 export function submitBlocker(db: Db, t: TreasuryTxn, asOf: string): string | null {
   if (!['VERIFICATION', 'RETURNED'].includes(t.status)) return 'Not ready to submit';
@@ -921,8 +973,12 @@ function submitOne(
   }
   const resubmission = t.status === 'RETURNED';
   const cycleNo = resubmission ? t.cycleNo + 1 : t.cycleNo;
-  // A resubmission goes through every level again, from the Account Officer.
-  if (resubmission) for (const code of CHAIN_CONTROLS) setControl(db, ctx, t.id, code, 'PENDING');
+  const first = statusAfterLevel(t.scenarioCode, 1);
+  // A resubmission goes through every level again, from the first approver.
+  if (resubmission)
+    for (const code of CHAIN_CONTROLS)
+      if (!skippedControls(t.scenarioCode).includes(code))
+        setControl(db, ctx, t.id, code, 'PENDING');
   // Replace vouchers, keeping numbers already issued for the same slot.
   const old = db.vouchers.filter((v) => v.txnId === t.id);
   const year = yearOf(today(ctx));
@@ -954,7 +1010,7 @@ function submitOne(
     ctx,
     t,
     {
-      status: 'PENDING_ACCOUNT_OFFICER',
+      status: first,
       cycleNo,
       submittedAt: ctx.at,
       headlineAmt: comp.headlineAmt,
@@ -966,12 +1022,20 @@ function submitOne(
     `${resubmission ? 'resubmitted' : 'signed and submitted'} with ${issued.map((v) => v.voucherNo).join(', ')}`
   );
   const customer = getById(db, 'customers', t.customerId, 'customer');
-  notify(db, ctx, {
-    targetUserId: customer.accountOfficerId,
-    title: `Call and check: ${t.txnRef}`,
-    body: `Call ${customer.customerName} on ${customer.regPhone}, then approve, return or reject. ${scenarioLabel(t.scenarioCode)} · ${formatNaira(t.headlineAmt)}`,
-    link: link(t),
-  });
+  if (first === 'PENDING_ACCOUNT_OFFICER')
+    notify(db, ctx, {
+      targetUserId: customer.accountOfficerId,
+      title: `Call and check: ${t.txnRef}`,
+      body: `Call ${customer.customerName} on ${customer.regPhone}, then approve, return or reject. ${scenarioLabel(t.scenarioCode)} · ${formatNaira(t.headlineAmt)}`,
+      link: link(t),
+    });
+  else
+    notify(db, ctx, {
+      targetRole: levelForStatus(first)!.roleCode,
+      title: `Approval needed: ${t.txnRef}`,
+      body: `${scenarioLabel(t.scenarioCode)} · ${formatNaira(t.headlineAmt)} submitted by ${u.fullName}`,
+      link: link(t),
+    });
   return getById(db, 'txns', t.id, 'transaction');
 }
 
@@ -990,21 +1054,10 @@ export function signAndSubmit(
   });
 }
 
-function nextStatusAfter(status: TxnStatus): TxnStatus {
-  switch (status) {
-    case 'PENDING_ACCOUNT_OFFICER':
-      return 'PENDING_HEAD_TREASURY';
-    case 'PENDING_HEAD_TREASURY':
-      return 'PENDING_MIS';
-    case 'PENDING_MIS':
-      return 'PENDING_AUDIT';
-    case 'PENDING_AUDIT':
-      return 'PENDING_MD';
-    case 'PENDING_MD':
-      return 'PENDING_OPERATIONS';
-    default:
-      throw new AppError('Not awaiting approval.', 'STATE');
-  }
+function nextStatusAfter(t: TreasuryTxn): TxnStatus {
+  const level = levelForStatus(t.status);
+  if (!level) throw new AppError('Not awaiting approval.', 'STATE');
+  return statusAfterLevel(t.scenarioCode, level.levelNo);
 }
 
 /** Why this user cannot act on this approval step (null = can act). Shared with the UI. */
@@ -1082,7 +1135,7 @@ function advance(
       ? `Customer confirmed on ${call.callDate} ${call.callTime}; ${how.toLowerCase()}`
       : how;
   setControl(db, ctx, t.id, level.control as ControlCode, 'PASSED', note);
-  const next = nextStatusAfter(t.status);
+  const next = nextStatusAfter(t);
   patchTxn(
     db,
     ctx,
@@ -1264,9 +1317,17 @@ export interface PaperApprovalArgs {
   documents: AttachmentInput[];
 }
 
+/** Paper signatures in this user's name that they have not yet confirmed or disputed. */
+export function openPaperSignatures(db: Db, t: TreasuryTxn, u: AppUser) {
+  return db.paperSignatures.filter(
+    (p) => p.txnId === t.id && p.signedBy === u.id && p.status === 'RECORDED'
+  );
+}
+
 /**
- * An approver who cannot use TreasuryDesk signs the printed voucher by hand; the maker uploads the
- * scan and that level is recorded as signed on paper, in the approver's name.
+ * An approver who cannot use TreasuryDesk signs the printed voucher by hand; the maker uploads the scan and that
+ * step is complete, in the approver's name. The approver is told and can confirm it, or dispute it if they did not
+ * sign — a dispute sends the transaction back to them if it has not been paid yet.
  */
 export function recordPaperApproval(
   ctx: Ctx,
@@ -1291,7 +1352,21 @@ export function recordPaperApproval(
     const blocker = approvalBlocker(db, t, signer!);
     if (blocker) throw new AppError(`${signer!.fullName}: ${blocker}`, 'FORBIDDEN');
     const ap = advance(db, ctx, t, signer!, level, a.reason.trim(), { recordedBy: u });
-    for (const f of a.documents) insertAttachment(db, ctx, t, 'PAPER_SIGNATURE', f, ap.id);
+    const p = insert(db, 'paperSignatures', {
+      txnId: t.id,
+      cycleNo: t.cycleNo,
+      levelNo: level.levelNo,
+      roleCode: level.roleCode,
+      signedBy: signer!.id,
+      recordedBy: u.id,
+      recordedAt: ctx.at,
+      reason: a.reason.trim(),
+      status: 'RECORDED',
+      decidedAt: null,
+      disputeReason: null,
+      approvalId: ap.id,
+    });
+    for (const f of a.documents) insertAttachment(db, ctx, t, 'PAPER_SIGNATURE', f, ap.id, p.id);
     // A paper signature stands for the checks that level would have made in the app.
     if (level.roleCode === 'AUD') {
       const v = db.verifications.find((x) => x.txnId === t.id)!;
@@ -1306,7 +1381,103 @@ export function recordPaperApproval(
       entityId: ap.id,
       action: 'PAPER_SIGNATURE',
       summary: `${t.txnRef}: ${level.label} signed on paper by ${signer!.fullName}, uploaded by ${u.fullName} (${a.documents.length} file(s))`,
-      after: { signedBy: signer!.fullName, reason: a.reason.trim() },
+      after: { signedBy: signer!.fullName, reason: p.reason, paperSignatureId: p.id },
+    });
+    notify(db, ctx, {
+      targetUserId: signer!.id,
+      title: `Signed on paper in your name: ${t.txnRef}`,
+      body: `${u.fullName} uploaded a voucher signed by you on paper and the step is complete. Confirm it, or dispute it if you did not sign.`,
+      link: link(t),
+    });
+    return t;
+  });
+}
+
+function namedPaperSignature(db: Db, ctx: Ctx, paperId: string) {
+  const u = actor(db, ctx);
+  const p = getById(db, 'paperSignatures', paperId, 'paper signature');
+  if (p.signedBy !== u.id)
+    throw new AppError('Only the person named on the paper signature can answer it.', 'FORBIDDEN');
+  if (p.status !== 'RECORDED')
+    throw new AppError('This paper signature has already been answered.', 'STATE');
+  return { u, p, t: txnOf(db, p.txnId) };
+}
+
+/** The named approver confirms the signature on paper is theirs. */
+export function confirmPaperSignature(ctx: Ctx, paperId: string): TreasuryTxn {
+  return mutate((db) => {
+    const { u, p, t } = namedPaperSignature(db, ctx, paperId);
+    const { before, after } = update(db, 'paperSignatures', p.id, {
+      status: 'CONFIRMED',
+      decidedAt: ctx.at,
+    });
+    writeAudit(db, ctx, {
+      entity: 'PaperSignature',
+      entityId: p.id,
+      action: 'PAPER_SIGNATURE_CONFIRMED',
+      summary: `${t.txnRef}: ${u.fullName} confirmed the paper signature uploaded in their name`,
+      before,
+      after,
+    });
+    return t;
+  });
+}
+
+/**
+ * The named approver says they did not sign. Their signature stops counting. If the transaction has not been paid,
+ * it comes back to them (and every later level signs again); either way Audit, Head of Treasury and the MD are
+ * alerted and the scan is kept.
+ */
+export function disputePaperSignature(ctx: Ctx, paperId: string, reason: string): TreasuryTxn {
+  return mutate((db) => {
+    const { u, p, t } = namedPaperSignature(db, ctx, paperId);
+    if (!reason.trim())
+      throw new AppError('Say what is wrong with it.', 'VALIDATION', {
+        reason: 'Reason is required',
+      });
+    const { before, after } = update(db, 'paperSignatures', p.id, {
+      status: 'DISPUTED',
+      decidedAt: ctx.at,
+      disputeReason: reason.trim(),
+    });
+    const ap = p.approvalId ? findById(db, 'approvals', p.approvalId) : undefined;
+    const live = !!ap && !ap.superseded && p.cycleNo === t.cycleNo;
+    const backToSigner = live && chainPosition(t.status) > p.levelNo && !recallBlocker(db, t);
+    const sentTo = backToSigner
+      ? sendBackToLevel(db, ctx, t, p.levelNo, 'Paper signature disputed')
+      : null;
+    if (!backToSigner && ap && !ap.superseded) update(db, 'approvals', ap.id, { superseded: true });
+    const maker = findById(db, 'users', p.recordedBy);
+    writeAudit(db, ctx, {
+      entity: 'PaperSignature',
+      entityId: p.id,
+      action: 'PAPER_SIGNATURE_DISPUTED',
+      summary: `${t.txnRef}: ${u.fullName} disputes the paper signature uploaded in their name by ${maker?.fullName ?? p.recordedBy} – ${reason.trim()}${backToSigner ? '; sent back to them' : ''}`,
+      before,
+      after,
+    });
+    if (sentTo)
+      patchTxn(
+        db,
+        ctx,
+        t,
+        { status: sentTo },
+        'PAPER_DISPUTED',
+        `paper signature disputed by ${u.fullName}; back with them to decide`
+      );
+    const body = `${u.fullName} says they did not sign the paper voucher uploaded by ${maker?.fullName ?? 'the maker'}: ${reason.trim()}${backToSigner ? ` It is back with ${u.fullName}.` : ''}`;
+    for (const role of ['AUD', 'HT', 'MD'] as RoleCode[])
+      notify(db, ctx, {
+        targetRole: role,
+        title: `Disputed paper signature: ${t.txnRef}`,
+        body,
+        link: link(t),
+      });
+    notify(db, ctx, {
+      targetUserId: p.recordedBy,
+      title: `Paper signature disputed: ${t.txnRef}`,
+      body,
+      link: link(t),
     });
     return t;
   });
@@ -1352,7 +1523,24 @@ function recallToMaker(db: Db, ctx: Ctx, t: TreasuryTxn, by: AppUser, reason: st
 
 function cancelPreparedPosting(db: Db, t: TreasuryTxn, why: string) {
   const prepared = db.executions.find((e) => e.txnId === t.id && e.status === 'PREPARED');
-  if (prepared) update(db, 'executions', prepared.id, { status: 'RETURNED', failureReason: why });
+  if (prepared) update(db, 'executions', prepared.id, { status: 'RETURNED', returnReason: why });
+}
+
+/**
+ * Money that Operations have recorded as paid has left the bank: the transaction can no longer be recalled. If the
+ * record is wrong, the approving Operations officer sends it back instead.
+ */
+export function recallBlocker(db: Db, t: TreasuryTxn): string | null {
+  if (!RECALLABLE_STATUSES.includes(t.status))
+    return 'Only submitted transactions not yet executed can be recalled';
+  if (preparedPosting(db, t.id)?.outcome === 'SUCCESS')
+    return 'Operations have recorded this as paid — it can no longer be recalled';
+  return null;
+}
+
+function requireRecallable(db: Db, t: TreasuryTxn) {
+  const why = recallBlocker(db, t);
+  if (why) throw new AppError(`${why}.`, 'STATE');
 }
 
 /** The maker recalls their own transaction at any point before it is executed. */
@@ -1361,7 +1549,7 @@ export function recall(ctx: Ctx, txnId: string, reason: string, version?: number
     const u = actor(db, ctx, ['TO']);
     const t = txnOf(db, txnId, version);
     requireMaker(t, u);
-    requireStatus(t, RECALLABLE_STATUSES);
+    requireRecallable(db, t);
     if (!reason.trim())
       throw new AppError('Give a reason for the recall.', 'VALIDATION', {
         reason: 'Reason is required',
@@ -1387,7 +1575,7 @@ export function requestRecall(ctx: Ctx, txnId: string, reason: string): RecallRe
     const t = txnOf(db, txnId);
     if (t.makerId === u.id)
       throw new AppError('You created this transaction — recall it yourself.', 'STATE');
-    requireStatus(t, RECALLABLE_STATUSES);
+    requireRecallable(db, t);
     if (!reason.trim())
       throw new AppError('Say why it should be recalled.', 'VALIDATION', {
         reason: 'Reason is required',
@@ -1422,6 +1610,22 @@ export function requestRecall(ctx: Ctx, txnId: string, reason: string): RecallRe
     });
     return r;
   });
+}
+
+/**
+ * Signatures from `target` on no longer count and those levels sign again; any payment record awaiting approval is
+ * cancelled. Returns the status waiting at that level for the caller to set. 7 = Operations.
+ */
+function sendBackToLevel(db: Db, ctx: Ctx, t: TreasuryTxn, target: number, why: string): TxnStatus {
+  for (const a of liveApprovals(db, t).filter(
+    (x) => x.levelNo >= target && x.action === 'APPROVE'
+  )) {
+    update(db, 'approvals', a.id, { superseded: true });
+    const lvl = APPROVAL_LEVELS[a.levelNo - 1];
+    if (lvl) setControl(db, ctx, t.id, lvl.control as ControlCode, 'PENDING', why);
+  }
+  cancelPreparedPosting(db, t, why);
+  return target === 7 ? 'PENDING_OPERATIONS' : APPROVAL_LEVELS[target - 1].pendingStatus!;
 }
 
 /** Whether a request can be answered by sending it back to the person who asked. */
@@ -1461,7 +1665,7 @@ export function decideRecall(
           note: 'Reason is required',
         });
     } else {
-      requireStatus(t, RECALLABLE_STATUSES);
+      requireRecallable(db, t);
     }
     if (decision === 'TO_MAKER') {
       recallToMaker(db, ctx, t, u, `at ${requester.fullName}'s request – ${r.reason}`);
@@ -1469,17 +1673,7 @@ export function decideRecall(
       const blocker = recallToRequesterBlocker(db, t, requester);
       if (blocker) throw new AppError(blocker, 'STATE');
       const target = requester.roleCode === 'OPS' ? 7 : levelForRole(requester.roleCode)!.levelNo;
-      // Signatures from that level on no longer count; those levels sign again.
-      for (const a of liveApprovals(db, t).filter(
-        (x) => x.levelNo >= target && x.action === 'APPROVE'
-      )) {
-        update(db, 'approvals', a.id, { superseded: true });
-        const lvl = APPROVAL_LEVELS[a.levelNo - 1];
-        if (lvl) setControl(db, ctx, t.id, lvl.control as ControlCode, 'PENDING', 'Sent back');
-      }
-      cancelPreparedPosting(db, t, 'Sent back to Operations');
-      const status: TxnStatus =
-        target === 7 ? 'PENDING_OPERATIONS' : APPROVAL_LEVELS[target - 1].pendingStatus!;
+      const status = sendBackToLevel(db, ctx, t, target, 'Sent back');
       patchTxn(
         db,
         ctx,
@@ -1663,14 +1857,6 @@ export function cancel(ctx: Ctx, txnId: string, reason: string, version?: number
 
 // ─── Operations ──────────────────────────────────────────────────────────────
 
-export type GapsOutcome = { ok: true; gapsRef: string } | { ok: false; reason: string };
-
-export const GAPS_FAILURE_REASONS = [
-  'Beneficiary account name mismatch',
-  'Cut-off time passed',
-  'Destination bank unavailable',
-];
-
 export function gapsRequired(db: Db, t: TreasuryTxn): boolean {
   const ins = db.instructions.find((i) => i.txnId === t.id);
   return needsGaps(t.scenarioCode, ins?.payDestination);
@@ -1787,8 +1973,10 @@ function settlePayout(db: Db, fo: Voucher | undefined) {
 /** Business effects of a successful execution (section 8 table). */
 function applyEffects(db: Db, ctx: Ctx, t: TreasuryTxn) {
   const vs = db.vouchers.filter((v) => v.txnId === t.id).sort((a, b) => a.seqNo - b.seqNo);
-  const fo = vs.find((v) => v.voucherType === 'FO');
-  const ro = vs.find((v) => v.voucherType === 'RO');
+  // A voucher that both pays out and rolls over serves as both parts.
+  const fo = vs.find((v) => v.voucherType === 'FO') ?? vs.find((v) => !!v.payment);
+  const ro =
+    vs.find((v) => v.voucherType === 'RO') ?? vs.find((v) => !!v.newRate && isPositive(v.rollAmt));
   const fi = vs.find((v) => v.voucherType === 'FI');
   const ts = vs.find((v) => v.voucherType === 'TS');
   const inv = findById(db, 'investments', t.investmentId);
@@ -1802,6 +1990,21 @@ function applyEffects(db: Db, ctx: Ctx, t: TreasuryTxn) {
         parentInvestmentId: null,
       });
       resultInvestmentId = created.id;
+      break;
+    }
+    case 'INFLOW_ACCOUNT': {
+      // Personal, Savings and Current accounts are credited here; a Call or other account is posted in
+      // Eazybankz by Operations and recorded on the voucher.
+      const target = t.input.creditTo;
+      const acc =
+        target === 'PA'
+          ? customerPa(db, t.customerId)
+          : target === 'SS'
+            ? customerSs(db, t.customerId)
+            : target === 'CA'
+              ? customerCa(db, t.customerId)
+              : undefined;
+      if (acc) credit(db, acc, fi!.principalAmt);
       break;
     }
     case 'MATURITY':
@@ -1868,9 +2071,9 @@ function applyEffects(db: Db, ctx: Ctx, t: TreasuryTxn) {
     case 'THIRD_PARTY_EXT':
     case 'THIRD_PARTY_INT': {
       const src = getById(db, 'accounts', t.sourceAccountId, 'source account');
-      const totalDebit = dec(fo!.netAmt).plus(dec(fo!.feeAmt)).gt(dec(fo!.principalAmt))
-        ? add(fo!.netAmt, fo!.feeAmt)
-        : fo!.principalAmt;
+      // The amount, or more when the transfer charge is added on top; COT is part of what is debited.
+      const withCharges = add(fo!.netAmt, fo!.feeAmt, fo!.cotAmt ?? ZERO);
+      const totalDebit = gt(withCharges, fo!.principalAmt) ? withCharges : fo!.principalAmt;
       debit(db, src, totalDebit, 'third-party payment');
       if (t.scenarioCode === 'THIRD_PARTY_INT') settlePayout(db, fo);
       break;
@@ -1926,14 +2129,37 @@ function applyEffects(db: Db, ctx: Ctx, t: TreasuryTxn) {
   return resultInvestmentId;
 }
 
+/** What Operations record after paying in GAPS (or posting in Eazybankz). */
+export interface PaymentRecord {
+  outcome: 'SUCCESS' | 'FAILED';
+  /** Eazybankz posting reference; required when it went through. */
+  cbsPostingRef?: string;
+  /** GAPS payment reference; required when an external payment went through. */
+  gapsRef?: string;
+  /** Why it failed; required when it failed. */
+  failureReason?: string;
+}
+
+function checkPaymentRecord(rec: PaymentRecord, viaGaps: boolean): void {
+  const e: Record<string, string> = {};
+  if (rec.outcome === 'SUCCESS') {
+    if (!rec.cbsPostingRef?.trim()) e.cbsPostingRef = 'Enter the Eazybankz posting reference';
+    if (viaGaps && !rec.gapsRef?.trim()) e.gapsRef = 'Enter the GAPS payment reference';
+  } else if (rec.outcome === 'FAILED') {
+    if (!rec.failureReason?.trim()) e.failureReason = 'Say why it failed';
+  } else e.outcome = 'Say whether it went through';
+  if (Object.keys(e).length) throw new AppError(Object.values(e)[0], 'VALIDATION', e);
+}
+
 /**
- * Operations, step one: an officer keys the Eazybankz posting reference. Nothing is posted yet —
- * a second Operations officer must approve it.
+ * Operations, step one: after paying in GAPS (or posting in Eazybankz), an officer records what happened — the
+ * references, or the failure and its reason. TreasuryDesk never sends or holds money. A second Operations officer
+ * must approve the record before it counts.
  */
-export function prepareExecution(
+export function recordExecution(
   ctx: Ctx,
   txnId: string,
-  cbsPostingRef: string,
+  rec: PaymentRecord,
   version?: number
 ): TreasuryTxn {
   return mutate((db) => {
@@ -1942,18 +2168,19 @@ export function prepareExecution(
     requireStatus(t, ['PENDING_OPERATIONS', 'EXEC_FAILED']);
     if (t.makerId === u.id)
       throw new AppError('Maker-checker: you created this transaction.', 'FORBIDDEN');
-    if (!cbsPostingRef.trim())
-      throw new AppError('Enter the Eazybankz posting reference.', 'VALIDATION', {
-        cbsPostingRef: 'Posting reference is required',
-      });
+    const viaGaps = gapsRequired(db, t);
+    checkPaymentRecord(rec, viaGaps);
+    const ok = rec.outcome === 'SUCCESS';
     const attemptNo = db.executions.filter((e) => e.txnId === t.id).length + 1;
     const ex = insert(db, 'executions', {
       txnId: t.id,
       attemptNo,
-      cbsPostingRef: cbsPostingRef.trim(),
-      gapsRef: null,
+      cbsPostingRef: rec.cbsPostingRef?.trim() || null,
+      gapsRef: (viaGaps && rec.gapsRef?.trim()) || null,
+      outcome: rec.outcome,
       status: 'PREPARED',
-      failureReason: null,
+      failureReason: ok ? null : rec.failureReason!.trim(),
+      returnReason: null,
       executedBy: u.id,
       executedAt: ctx.at,
       approvedBy: null,
@@ -1961,142 +2188,141 @@ export function prepareExecution(
       confirmedBy: null,
       confirmedAt: null,
     });
+    const what = ok
+      ? viaGaps
+        ? `paid in GAPS (${ex.gapsRef}), posted ${ex.cbsPostingRef}`
+        : `posted in Eazybankz (${ex.cbsPostingRef})`
+      : `failed – ${ex.failureReason}`;
     writeAudit(db, ctx, {
       entity: 'Execution',
       entityId: ex.id,
-      action: 'PREPARE',
-      summary: `${t.txnRef}: posting ${ex.cbsPostingRef} keyed by ${u.fullName}, awaiting a second officer`,
-      after: { cbsPostingRef: ex.cbsPostingRef, attemptNo },
+      action: 'RECORD',
+      summary: `${t.txnRef}: ${what}; recorded by ${u.fullName}, awaiting a second officer`,
+      after: {
+        attemptNo,
+        outcome: ex.outcome,
+        cbsPostingRef: ex.cbsPostingRef,
+        gapsRef: ex.gapsRef,
+        failureReason: ex.failureReason,
+      },
     });
     patchTxn(
       db,
       ctx,
       t,
       { status: 'PENDING_OPS_APPROVAL' },
-      'PREPARE',
-      `posting keyed by ${u.fullName}`
+      'RECORD',
+      `payment recorded by ${u.fullName} (${ok ? 'went through' : 'failed'})`
     );
     notify(db, ctx, {
       targetRole: 'OPS',
-      title: `Posting to approve: ${t.txnRef}`,
-      body: `${u.fullName} keyed ${ex.cbsPostingRef}. Another Operations officer must approve it.`,
+      title: `Payment record to approve: ${t.txnRef}`,
+      body: `${u.fullName} recorded it as ${ok ? 'paid' : `failed (${ex.failureReason})`}. Another Operations officer must approve the record.`,
       link: link(t),
     });
     return t;
   });
 }
 
-/** The prepared posting awaiting a second officer, if any. */
+/** The payment record awaiting a second officer, if any. */
 export function preparedPosting(db: Db, txnId: string) {
   return db.executions.find((e) => e.txnId === txnId && e.status === 'PREPARED');
 }
 
-/** Why this user cannot approve the prepared posting (null = can). */
+/** Why this user cannot approve the payment record (null = can). */
 export function opsApprovalBlocker(db: Db, t: TreasuryTxn, u: AppUser): string | null {
-  if (t.status !== 'PENDING_OPS_APPROVAL') return 'No posting is waiting for approval';
-  if (u.roleCode !== 'OPS') return 'Only Operations approve a posting';
+  if (t.status !== 'PENDING_OPS_APPROVAL') return 'No payment record is waiting for approval';
+  if (u.roleCode !== 'OPS') return 'Only Operations approve a payment record';
   const ex = preparedPosting(db, t.id);
-  if (!ex) return 'No posting is waiting for approval';
+  if (!ex) return 'No payment record is waiting for approval';
   if (ex.executedBy === u.id)
-    return 'You keyed this posting — another Operations officer must approve it';
+    return 'You recorded this payment — another Operations officer must approve it';
   if (t.makerId === u.id) return 'Maker-checker: you created this transaction';
   return null;
 }
 
 /**
- * Operations, step two: a different officer approves the posting, and only then is it executed —
- * posted in Eazybankz and, where money leaves the bank, sent to GAPS.
+ * Operations, step two: a different officer checks the record against GAPS and Eazybankz and approves it. A
+ * successful payment executes the transaction; a failed one is logged and goes back for Operations to pay again.
  */
-export function approveExecution(
-  ctx: Ctx,
-  txnId: string,
-  gaps: GapsOutcome | null,
-  version?: number
-): TreasuryTxn {
+export function approveExecution(ctx: Ctx, txnId: string, version?: number): TreasuryTxn {
   return mutate((db) => {
     const u = actor(db, ctx, ['OPS']);
     const t = txnOf(db, txnId, version);
     const blocker = opsApprovalBlocker(db, t, u);
     if (blocker) throw new AppError(blocker, 'FORBIDDEN');
     const ex = preparedPosting(db, t.id)!;
-    const gapsNeeded = gapsRequired(db, t);
-    if (gapsNeeded && !gaps) throw new AppError('Send the payment to GAPS first.', 'VALIDATION');
-    const outcome = gapsNeeded ? gaps! : null;
+    update(db, 'executions', ex.id, { approvedBy: u.id, approvedAt: ctx.at });
+    return finishExecution(db, ctx, t, getById(db, 'executions', ex.id, 'execution'));
+  });
+}
 
-    if (outcome && !outcome.ok) {
-      update(db, 'executions', ex.id, {
-        status: 'FAILED',
-        failureReason: outcome.reason,
-        approvedBy: u.id,
-        approvedAt: ctx.at,
-      });
-      writeAudit(db, ctx, {
-        entity: 'Execution',
-        entityId: ex.id,
-        action: 'GAPS_FAILED',
-        summary: `${t.txnRef}: GAPS submission failed – ${outcome.reason}`,
-        after: { attemptNo: ex.attemptNo, failureReason: outcome.reason },
-      });
-      patchTxn(
-        db,
-        ctx,
-        t,
-        { status: 'EXEC_FAILED' },
-        'EXEC_FAILED',
-        `execution failed (${outcome.reason})`
-      );
-      notify(db, ctx, {
-        targetUserId: t.makerId,
-        title: `Execution failed: ${t.txnRef}`,
-        body: `GAPS: ${outcome.reason}. Operations will key it again.`,
-        link: link(t),
-      });
-      return t;
-    }
-
-    const resultInvestmentId = applyEffects(db, ctx, t);
-    update(db, 'executions', ex.id, {
-      status: 'SUCCESS',
-      gapsRef: outcome && outcome.ok ? outcome.gapsRef : null,
-      approvedBy: u.id,
-      approvedAt: ctx.at,
-    });
-    const done = getById(db, 'executions', ex.id, 'execution');
-    const preparer = findById(db, 'users', done.executedBy);
+function finishExecution(db: Db, ctx: Ctx, t: TreasuryTxn, ex: Execution): TreasuryTxn {
+  const preparer = findById(db, 'users', ex.executedBy);
+  const approver = findById(db, 'users', ex.approvedBy);
+  const viaGaps = gapsRequired(db, t);
+  if (ex.outcome === 'FAILED') {
+    update(db, 'executions', ex.id, { status: 'FAILED' });
     writeAudit(db, ctx, {
       entity: 'Execution',
       entityId: ex.id,
-      action: 'EXECUTED',
-      summary: `${t.txnRef}: posted in Eazybankz (${done.cbsPostingRef})${done.gapsRef ? `, GAPS ${done.gapsRef}` : ''} – keyed by ${preparer?.fullName}, approved by ${u.fullName}`,
-      after: { cbsPostingRef: done.cbsPostingRef, gapsRef: done.gapsRef, approvedBy: u.id },
+      action: 'EXEC_FAILED',
+      summary: `${t.txnRef}: failed ${viaGaps ? 'GAPS payment' : 'posting'} confirmed – ${ex.failureReason} (recorded by ${preparer?.fullName}, approved by ${approver?.fullName})`,
+      after: { attemptNo: ex.attemptNo, failureReason: ex.failureReason },
     });
-    setControl(
-      db,
-      ctx,
-      t.id,
-      'C11',
-      'PASSED',
-      `Posting ${done.cbsPostingRef}${done.gapsRef ? ` · GAPS ${done.gapsRef}` : ''} · keyed by ${preparer?.fullName}, approved by ${u.fullName}`
-    );
     patchTxn(
       db,
       ctx,
       t,
-      { status: 'EXECUTED', resultInvestmentId: resultInvestmentId ?? t.resultInvestmentId },
-      'EXECUTE',
-      'executed by Operations'
+      { status: 'EXEC_FAILED' },
+      'EXEC_FAILED',
+      `payment failed (${ex.failureReason})`
     );
     notify(db, ctx, {
       targetUserId: t.makerId,
-      title: `Executed: ${t.txnRef}`,
-      body: 'Confirm completion with the customer to close the transaction.',
+      title: `Payment failed: ${t.txnRef}`,
+      body: `${ex.failureReason}. Operations will pay it again and record the outcome.`,
       link: link(t),
     });
     return t;
+  }
+
+  const resultInvestmentId = applyEffects(db, ctx, t);
+  update(db, 'executions', ex.id, { status: 'SUCCESS' });
+  const refs = `${ex.cbsPostingRef}${ex.gapsRef ? ` · GAPS ${ex.gapsRef}` : ''}`;
+  writeAudit(db, ctx, {
+    entity: 'Execution',
+    entityId: ex.id,
+    action: 'EXECUTED',
+    summary: `${t.txnRef}: ${viaGaps ? 'GAPS payment' : 'posting'} confirmed (${refs}) – recorded by ${preparer?.fullName}, approved by ${approver?.fullName}`,
+    after: { cbsPostingRef: ex.cbsPostingRef, gapsRef: ex.gapsRef, approvedBy: ex.approvedBy },
   });
+  setControl(
+    db,
+    ctx,
+    t.id,
+    'C11',
+    'PASSED',
+    `Posting ${refs} · recorded by ${preparer?.fullName}, approved by ${approver?.fullName}`
+  );
+  patchTxn(
+    db,
+    ctx,
+    t,
+    { status: 'EXECUTED', resultInvestmentId: resultInvestmentId ?? t.resultInvestmentId },
+    'EXECUTE',
+    'executed by Operations'
+  );
+  notify(db, ctx, {
+    targetUserId: t.makerId,
+    title: `Executed: ${t.txnRef}`,
+    body: 'Confirm completion with the customer to close the transaction.',
+    link: link(t),
+  });
+  return t;
 }
 
-/** The second officer sends a keyed posting back to be corrected. */
+/** The second officer sends a payment record back to be corrected. */
 export function returnExecution(
   ctx: Ctx,
   txnId: string,
@@ -2115,7 +2341,7 @@ export function returnExecution(
     const ex = preparedPosting(db, t.id)!;
     update(db, 'executions', ex.id, {
       status: 'RETURNED',
-      failureReason: reason.trim(),
+      returnReason: reason.trim(),
       approvedBy: u.id,
       approvedAt: ctx.at,
     });
@@ -2125,11 +2351,11 @@ export function returnExecution(
       t,
       { status: 'PENDING_OPERATIONS' },
       'POSTING_RETURNED',
-      `posting ${ex.cbsPostingRef} sent back by ${u.fullName} (${reason.trim()})`
+      `payment record sent back by ${u.fullName} (${reason.trim()})`
     );
     notify(db, ctx, {
       targetUserId: ex.executedBy,
-      title: `Posting sent back: ${t.txnRef}`,
+      title: `Payment record sent back: ${t.txnRef}`,
       body: `${u.fullName}: ${reason.trim()}`,
       link: link(t),
     });
@@ -2189,8 +2415,9 @@ export function raiseReversal(ctx: Ctx, originalTxnId: string, input: TxnInput =
 
 export function addComment(ctx: Ctx, txnId: string, body: string): TxnComment {
   return mutate((db) => {
-    actor(db, ctx);
+    const u = actor(db, ctx);
     const t = txnOf(db, txnId);
+    requireCustomerScope(db, u, t.customerId);
     if (!body.trim())
       throw new AppError('Comment cannot be empty.', 'VALIDATION', {
         body: 'Comment cannot be empty',
@@ -2201,6 +2428,8 @@ export function addComment(ctx: Ctx, txnId: string, body: string): TxnComment {
       body: body.trim(),
       createdAt: ctx.at,
       editedAt: null,
+      deletedAt: null,
+      deletedBy: null,
     });
     writeAudit(db, ctx, {
       entity: 'TxnComment',
@@ -2224,6 +2453,7 @@ export function editComment(
     const c = getById(db, 'comments', commentId, 'comment');
     if (c.userId !== ctx.userId)
       throw new AppError('You can only edit your own comments.', 'FORBIDDEN');
+    if (c.deletedAt) throw new AppError('This comment was deleted.', 'STATE');
     if (!body.trim())
       throw new AppError('Comment cannot be empty.', 'VALIDATION', {
         body: 'Comment cannot be empty',
@@ -2254,12 +2484,14 @@ export function deleteComment(ctx: Ctx, commentId: string, version?: number): vo
     const c = getById(db, 'comments', commentId, 'comment');
     if (c.userId !== ctx.userId)
       throw new AppError('You can only delete your own comments.', 'FORBIDDEN');
-    remove(db, 'comments', c.id, version, 'comment');
+    if (c.deletedAt) throw new AppError('This comment was already deleted.', 'STATE');
+    // Kept, not erased: hidden from the working view, still visible to Internal Audit.
+    update(db, 'comments', c.id, { deletedAt: ctx.at, deletedBy: ctx.userId }, version, 'comment');
     writeAudit(db, ctx, {
       entity: 'TxnComment',
       entityId: c.id,
       action: 'DELETE',
-      summary: 'Comment deleted',
+      summary: 'Comment deleted (kept for Internal Audit)',
       before: { body: c.body },
     });
   });
@@ -2288,7 +2520,9 @@ export function addSupportingDocuments(
       files.map((f) => ({ ...f, id: undefined })),
       true
     );
-    const onFile = db.attachments.filter((a) => a.txnId === t.id && a.kind === 'SUPPORTING');
+    const onFile = db.attachments.filter(
+      (a) => a.txnId === t.id && a.kind === 'SUPPORTING' && !a.deletedAt
+    );
     if (onFile.length + files.length > MAX_ATTACHMENTS * 3)
       throw new AppError('This transaction already has the most documents allowed.', 'VALIDATION');
     const added = files.map((f) =>
@@ -2317,12 +2551,14 @@ export function removeSupportingDocument(ctx: Ctx, attachmentId: string): void {
       throw new AppError('You can only remove documents you uploaded.', 'FORBIDDEN');
     if (CLOSED_STATUSES.includes(t.status))
       throw new AppError('The transaction is closed; its documents are kept.', 'STATE');
-    remove(db, 'attachments', a.id);
+    if (a.deletedAt) throw new AppError('This document was already removed.', 'STATE');
+    // Kept, not erased: an approver may have relied on it. Hidden from the working view; Internal Audit sees it.
+    update(db, 'attachments', a.id, { deletedAt: ctx.at, deletedBy: u.id });
     writeAudit(db, ctx, {
       entity: 'Attachment',
       entityId: a.id,
       action: 'DELETE',
-      summary: `${t.txnRef}: supporting document ${a.fileName} removed`,
+      summary: `${t.txnRef}: supporting document ${a.fileName} removed (kept for Internal Audit)`,
       before: { fileName: a.fileName },
     });
   });
@@ -2524,7 +2760,9 @@ function importRow(db: Db, ctx: Ctx, register: ImportRegister, row: Record<strin
         customerId: c.id,
         accountNo: row.accountNo,
         accountName: row.accountName,
-        productCode: row.productCode === 'SS' ? 'SS' : 'PA',
+        productCode: (['SS', 'CA'].includes(row.productCode.toUpperCase())
+          ? row.productCode.toUpperCase()
+          : 'PA') as AccountProductCode,
         ledgerBal: row.ledgerBal,
         availableBal: row.availableBal || row.ledgerBal,
         status: 'ACTIVE',
@@ -2662,3 +2900,93 @@ export function sweepMaturities(ctx: Ctx): number {
 }
 
 export { APPROVAL_LEVELS };
+
+// ─── Audit-trail review ──────────────────────────────────────────────────────
+
+export interface AuditReviewResult {
+  done: number[];
+  skipped: { seqNo: number; reason: string }[];
+}
+
+/** The current review of each audit entry (the newest review row), keyed by event id. */
+export function currentAuditReviews(db: Db) {
+  const map = new Map<string, Db['auditReviews'][number]>();
+  for (const r of db.auditReviews) map.set(r.auditEventId, r);
+  return map;
+}
+
+/**
+ * Internal Audit marks audit-trail entries verified, flags them with a reason, or puts them back to not reviewed.
+ * An auditor never reviews their own actions. One audit event records the whole selection.
+ */
+export function reviewAuditEvents(
+  ctx: Ctx,
+  eventIds: string[],
+  status: AuditReviewStatus,
+  note: string
+): AuditReviewResult {
+  return mutate((db) => {
+    const u = actor(db, ctx, ['AUD']);
+    if (!eventIds.length) throw new AppError('Select at least one entry.', 'VALIDATION');
+    if (status !== 'VERIFIED' && !note.trim())
+      throw new AppError(
+        status === 'FLAGGED' ? 'Say why you are flagging it.' : 'Say why it is being reopened.',
+        'VALIDATION',
+        { note: 'Reason is required' }
+      );
+    const current = currentAuditReviews(db);
+    const out: AuditReviewResult = { done: [], skipped: [] };
+    for (const id of eventIds) {
+      const e = getById(db, 'audit', id, 'audit entry');
+      const now = current.get(e.id)?.status ?? 'NOT_REVIEWED';
+      if (e.userId === u.id) {
+        out.skipped.push({ seqNo: e.seqNo, reason: 'your own action' });
+        continue;
+      }
+      if (now === status) {
+        out.skipped.push({
+          seqNo: e.seqNo,
+          reason: `already ${status === 'NOT_REVIEWED' ? 'not reviewed' : status.toLowerCase()}`,
+        });
+        continue;
+      }
+      insert(db, 'auditReviews', {
+        auditEventId: e.id,
+        auditSeqNo: e.seqNo,
+        status,
+        note: note.trim(),
+        reviewedBy: u.id,
+        reviewedAt: ctx.at,
+      });
+      out.done.push(e.seqNo);
+    }
+    if (out.done.length) {
+      const verb =
+        status === 'VERIFIED'
+          ? 'marked verified'
+          : status === 'FLAGGED'
+            ? 'flagged'
+            : 'put back to not reviewed';
+      const list = out.done
+        .slice(0, 12)
+        .map((n) => `#${n}`)
+        .join(', ');
+      writeAudit(db, ctx, {
+        entity: 'AuditReview',
+        entityId: `AUDIT-${out.done[0]}`,
+        action: `REVIEW_${status}`,
+        summary: `${u.fullName} ${verb} ${out.done.length} audit entr${out.done.length === 1 ? 'y' : 'ies'} (${list}${out.done.length > 12 ? ', …' : ''})${note.trim() ? `: ${note.trim()}` : ''}`,
+        after: { status, seqNos: out.done, note: note.trim() },
+      });
+      if (status === 'FLAGGED')
+        for (const role of ['HT', 'MD'] as RoleCode[])
+          notify(db, ctx, {
+            targetRole: role,
+            title: `Audit flagged ${out.done.length} entr${out.done.length === 1 ? 'y' : 'ies'}`,
+            body: `${u.fullName}: ${note.trim()}`,
+            link: '/audit?review=FLAGGED',
+          });
+    }
+    return out;
+  });
+}

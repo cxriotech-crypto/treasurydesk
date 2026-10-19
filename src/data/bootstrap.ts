@@ -2,4 +2,4 @@
 import { registerSeeder } from './store';
 import { buildSeed } from './seed';
 
-registerSeeder(() => buildSeed());
+registerSeeder((opts) => buildSeed(opts));

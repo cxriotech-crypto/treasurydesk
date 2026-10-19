@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { ArrowLeft, ArrowRight, RefreshCw } from 'lucide-react';
+import { SCENARIO_META } from '@/domain/codes';
 import { formatTime } from '@/lib/format';
 import { transactionsService } from '@/services';
 import type { CbsSnapshot } from '@/services/transactionsService';
@@ -11,7 +12,7 @@ import type { StepProps } from './Wizard';
 
 export function StepCbs({ detail, goTo }: StepProps) {
   const { txn, verification } = detail;
-  const inflow = txn.scenarioCode === 'INFLOW';
+  const inflow = SCENARIO_META[txn.scenarioCode].txnType === 'INFLOW';
   const [snap, setSnap] = useState<CbsSnapshot | null>(null);
   const [loading, setLoading] = useState(false);
   const [confirmed, setConfirmed] = useState(verification?.cbsConfirmed ?? false);
@@ -44,7 +45,6 @@ export function StepCbs({ detail, goTo }: StepProps) {
     setError(null);
     try {
       await transactionsService.confirmCbs(txn.id, {
-        cbsSyncedAt: snap.syncedAt,
         fundsReceived: funds,
         sourceConfirmed: source,
       });

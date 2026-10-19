@@ -5,6 +5,7 @@ import { useSearchParams } from 'next/navigation';
 import { ArrowRight } from 'lucide-react';
 import type { TreasuryTxn } from '@/domain/types';
 import {
+  ACCOUNT_PRODUCT_LABELS,
   SCENARIO_META,
   TXN_TYPES,
   TXN_TYPE_META,
@@ -147,7 +148,7 @@ export function StepSubject({
       const rows = await accountsService.forScenario(scenario, customerId);
       return rows.map((r) => ({
         id: r.id,
-        title: `${r.accountNo} · ${r.productCode === 'PA' ? 'Personal Account' : 'Savings'}`,
+        title: `${r.accountNo} · ${ACCOUNT_PRODUCT_LABELS[r.productCode]}`,
         sub: `Available ${formatNaira(r.availableBal)}`,
         amount: r.availableBal,
         disabledReason: r.disabledReason,

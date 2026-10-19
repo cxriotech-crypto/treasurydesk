@@ -2,7 +2,7 @@
 
 import { Suspense, useState } from 'react';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
-import { CheckCircle2, KeyRound, RotateCw } from 'lucide-react';
+import { CheckCircle2, ClipboardCheck, RotateCw } from 'lucide-react';
 import { scenarioLabel } from '@/domain/codes';
 import { operationsService } from '@/services';
 import { useData } from '@/services/useData';
@@ -108,20 +108,23 @@ function OperationsQueue() {
               disabledReason={r.approveBlocker}
               onClick={() => setOpen(r.id)}
             >
-              Approve posting
+              Approve record
             </Button>
             {r.prepared ? (
-              <span className="text-xs text-muted">Keyed by {r.prepared.preparedBy}</span>
+              <span className="text-xs text-muted">
+                {r.prepared.outcome === 'SUCCESS' ? 'Paid' : 'Failed'} · recorded by{' '}
+                {r.prepared.preparedBy}
+              </span>
             ) : null}
           </span>
         ) : (
           <Button
             size="sm"
             variant={r.status === 'EXEC_FAILED' ? 'secondary' : 'primary'}
-            icon={r.status === 'EXEC_FAILED' ? RotateCw : KeyRound}
+            icon={r.status === 'EXEC_FAILED' ? RotateCw : ClipboardCheck}
             onClick={() => setOpen(r.id)}
           >
-            {r.status === 'EXEC_FAILED' ? 'Key again' : 'Key posting'}
+            {r.status === 'EXEC_FAILED' ? 'Record again' : 'Record payment'}
           </Button>
         ),
       cardLabel: 'Action',
@@ -132,18 +135,18 @@ function OperationsQueue() {
     <>
       <PageHeader
         title="Operations"
-        description="Fully approved transactions to post in Eazybankz and pay through GAPS. One officer keys each posting; a different officer approves it before anything is executed."
+        description="Fully approved transactions. Pay them in GAPS (and post in Eazybankz) as usual, then record the outcome here: one officer records it, a different officer approves the record. TreasuryDesk never sends or holds money."
       />
       <div className="mb-5">
         <KpiGrid>
           <KpiTile
-            label="To key"
+            label="To pay and record"
             value={all.data ? all.data.total - failed - toApprove : null}
             loading={all.loading}
           />
           <KpiTile label="Awaiting a second officer" value={toApprove} loading={all.loading} />
           <KpiTile
-            label="GAPS failures"
+            label="Failed payments"
             value={failed}
             tone={failed ? 'danger' : 'default'}
             loading={all.loading}
@@ -187,8 +190,8 @@ function OperationsQueue() {
                 onChange={(e) => setStatus(e.target.value as typeof status)}
                 options={[
                   { value: 'PENDING_OPERATIONS', label: 'Ready for Operations' },
-                  { value: 'PENDING_OPS_APPROVAL', label: 'Awaiting Operations approval' },
-                  { value: 'EXEC_FAILED', label: 'Execution failed' },
+                  { value: 'PENDING_OPS_APPROVAL', label: 'Record awaiting approval' },
+                  { value: 'EXEC_FAILED', label: 'Payment failed' },
                 ]}
               />
             </div>

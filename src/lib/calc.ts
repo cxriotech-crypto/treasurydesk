@@ -37,7 +37,7 @@ export const DEFAULT_SETTINGS: Settings = {
   dayCount: 365,
   whtOnAnniversary: false,
   whtBasisPreliq: 'AFTER_CHARGE',
-  partialPreliqInterest: 'NOT_PAID',
+  partialPreliqInterest: 'CAPITALISED',
   tpFeeMode: 'DEDUCT',
   rolloverCInterest: 'PAY_OUT',
   rolloverABasis: 'NET',
@@ -45,7 +45,6 @@ export const DEFAULT_SETTINGS: Settings = {
   slaHours: 8,
   slaCutoff: '15:00',
   demoLatencyMs: 400,
-  gapsFailureRate: 10,
 };
 
 export const MAX_TENOR_DAYS = 1825;
@@ -648,6 +647,29 @@ export function calcThirdParty(
     errors.amount = `Total debit ${N(totalDebit.value)} exceeds available balance ${N(available)}`;
   }
   return { amount: fig(A, 'Amount instructed'), fee, toBeneficiary, totalDebit, errors };
+}
+
+// ─── Commission on turnover (COT) ────────────────────────────────────────────
+
+/** Validate a per-mille rate (₦ per ₦1,000): more than 0, at most 50, up to 2 decimals. */
+export function validatePerMille(rate: string): string | null {
+  if (!/^\d+(\.\d{1,2})?$/.test(rate.trim())) return 'Enter the rate per mille, e.g. 2 or 5';
+  const r = dec(rate);
+  if (r.lte(0)) return 'The rate must be more than 0';
+  if (r.gt(50)) return 'The rate cannot be more than 50 per mille';
+  return null;
+}
+
+/** COT = rate per mille × amount ÷ 1,000 (₦2 per mille on ₦100,000 = ₦200). */
+export function calcCot(amount: string, ratePerMille: string): { cot: Fig; errors: Errors } {
+  const errors: Errors = {};
+  collect(errors, 'cotRatePerMille', validatePerMille(ratePerMille));
+  if (errors.cotRatePerMille) return { cot: fig(ZERO, 'Invalid rate'), errors };
+  const v = toMoney(dec(amount).times(dec(ratePerMille)).dividedBy(1000));
+  return {
+    cot: fig(v, `${ratePerMille} × ${N(amount)} ÷ 1,000 = ${N(v)}`),
+    errors,
+  };
 }
 
 // ─── Transfer ────────────────────────────────────────────────────────────────

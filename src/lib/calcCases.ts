@@ -6,6 +6,7 @@ import type { Settings } from '@/domain/types';
 import {
   DEFAULT_SETTINGS,
   calcAnniversary,
+  calcCot,
   calcInflow,
   calcMaturity,
   calcPreliqFull,
@@ -333,6 +334,25 @@ export const CALC_CASES: CalcCase[] = [
         L('Payout', '10665753.43', off.payout.value),
       ];
     },
+  },
+  {
+    id: 'X12',
+    name: 'Commission on turnover (client examples)',
+    required: false,
+    run: () =>
+      (
+        [
+          ['100000', '2', '200.00'],
+          ['100000', '5', '500.00'],
+          ['500000', '2', '1000.00'],
+          ['500000', '5', '2500.00'],
+          ['1000000', '2', '2000.00'],
+          ['1000000', '5', '5000.00'],
+          ['1234567.89', '3.5', '4320.99'],
+        ] as const
+      ).map(([amt, rate, want]) =>
+        L(`₦${rate} per mille on ₦${amt}`, want, calcCot(amt, rate).cot.value)
+      ),
   },
   {
     id: 'X9',

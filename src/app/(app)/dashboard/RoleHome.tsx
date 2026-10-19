@@ -280,7 +280,7 @@ function OpsView({ d }: { d: OpsDashboard }) {
         <KpiTile label="Ready to execute" value={d.ready} href="/operations" />
         <KpiTile label="Executed today" value={d.executedToday} />
         <KpiTile
-          label="GAPS failures"
+          label="Failed payments"
           value={d.failures}
           tone={d.failures ? 'danger' : 'default'}
           href="/operations?status=EXEC_FAILED"

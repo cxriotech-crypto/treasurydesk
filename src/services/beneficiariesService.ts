@@ -5,6 +5,7 @@ import { validateAccountNo } from '@/lib/calc';
 import { getDb, mutate } from '@/data/store';
 import { AppError, findById, getById, matchesSearch, paginate } from '@/data/repo';
 import { USE_MOCK, ctx, http, run } from './core';
+import { ports } from './ports';
 import { auditedInsert, auditedRemove, auditedUpdate, fieldErrors } from './crud';
 
 export interface BeneficiaryFilters {
@@ -40,35 +41,6 @@ export interface BeneficiariesService {
   /** Simulated name enquiry (~1 s). */
   nameEnquiry(bankCode: string, accountNo: string): Promise<NameEnquiryResult>;
 }
-
-const SURNAMES = [
-  'Okeke',
-  'Adeyemi',
-  'Ibrahim',
-  'Nwosu',
-  'Balogun',
-  'Eze',
-  'Lawal',
-  'Okafor',
-  'Bello',
-  'Ogunbiyi',
-  'Umeh',
-  'Salami',
-];
-const FIRSTS = [
-  'Chinwe',
-  'Tolu',
-  'Abubakar',
-  'Ngozi',
-  'Kayode',
-  'Ifeanyi',
-  'Fatima',
-  'Segun',
-  'Adaora',
-  'Musa',
-  'Temitope',
-  'Nnamdi',
-];
 
 function bankNameOf(code: string): string {
   if (code === INTERNAL_BANK_CODE) return INTERNAL_BANK_NAME;
@@ -174,8 +146,8 @@ export const mockBeneficiariesService: BeneficiariesService = {
         )
       );
     }),
-  nameEnquiry: (bankCode, accountNo) =>
-    run(() => {
+  nameEnquiry: async (bankCode, accountNo) => {
+    const local = await run(() => {
       const err = validateAccountNo(accountNo);
       if (err) throw new AppError(err, 'VALIDATION', { accountNo: err });
       const db = getDb();
@@ -185,7 +157,7 @@ export const mockBeneficiariesService: BeneficiariesService = {
           throw new AppError('No internal account with this number.', 'NOT_FOUND', {
             accountNo: 'Account not found',
           });
-        return { accountName: a.accountName, bankName: INTERNAL_BANK_NAME };
+        return { found: { accountName: a.accountName, bankName: INTERNAL_BANK_NAME } };
       }
       const bank = db.banks.find((b) => b.bankCode === bankCode);
       if (!bank)
@@ -194,17 +166,20 @@ export const mockBeneficiariesService: BeneficiariesService = {
         throw new AppError(`${bank.bankName} is not available for transfers.`, 'VALIDATION', {
           bankCode: 'Bank is inactive',
         });
-      const saved = db.beneficiaries.find(
-        (b) => b.bankCode === bankCode && b.accountNo === accountNo
-      );
-      if (saved) return { accountName: saved.benefName.toUpperCase(), bankName: bank.bankName };
-      const h = [...accountNo].reduce((s, ch) => (s * 31 + ch.charCodeAt(0)) >>> 0, 7);
-      return {
-        accountName:
-          `${FIRSTS[h % FIRSTS.length]} ${SURNAMES[(h >> 4) % SURNAMES.length]}`.toUpperCase(),
-        bankName: bank.bankName,
-      };
-    }, 1000),
+      // The simulator answers from saved beneficiaries; a real channel is always asked (names change).
+      const saved =
+        ports().payments.mode === 'simulator'
+          ? db.beneficiaries.find((b) => b.bankCode === bankCode && b.accountNo === accountNo)
+          : undefined;
+      if (saved)
+        return { found: { accountName: saved.benefName.toUpperCase(), bankName: bank.bankName } };
+      return { ask: bank.bankName };
+    });
+    if ('found' in local) return local.found!;
+    const r = await ports().payments.nameEnquiry(bankCode, accountNo);
+    if (!r.ok) throw new AppError(r.reason, 'NOT_FOUND', { accountNo: r.reason });
+    return { accountName: r.accountName, bankName: local.ask };
+  },
 };
 
 export const httpBeneficiariesService: BeneficiariesService = {

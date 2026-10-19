@@ -28,6 +28,7 @@ import type { Db } from '@/data/db';
 import { getDb } from '@/data/store';
 import { USE_MOCK, http, requireUser, run } from './core';
 import { userName } from './transactionsService';
+import { paysOut } from './voucherBuilder';
 
 export type ReportCode =
   | 'POSITION'
@@ -60,7 +61,7 @@ export const REPORTS: {
   {
     code: 'CHARGES',
     title: 'Charges & fee income',
-    description: 'Pre-liquidation charges and transfer fees earned.',
+    description: 'Pre-liquidation charges, transfer fees and commission on turnover earned.',
     usesRange: true,
   },
   {
@@ -238,7 +239,7 @@ function position(db: Db, r: DateRange): Report {
   let rollCount = 0;
   for (const t of done) {
     for (const v of vouchersOf(db, t)) {
-      if (v.voucherType === 'FO') outflows[t.txnType] = add(outflows[t.txnType] ?? ZERO, v.netAmt);
+      if (paysOut(v)) outflows[t.txnType] = add(outflows[t.txnType] ?? ZERO, v.netAmt);
       if (v.voucherType === 'FI') inflows = add(inflows, v.principalAmt);
       if (v.voucherType === 'RO' && t.txnType === 'ROLLOVER') {
         rolled = add(rolled, v.rollAmt);
@@ -359,9 +360,10 @@ function charges(db: Db, r: DateRange): Report {
   const rows: ReportRow[] = [];
   for (const t of completedIn(db, r)) {
     const vs = vouchersOf(db, t);
-    const charge = add(ZERO, ...vs.filter((v) => v.voucherType === 'FO').map((v) => v.chargeAmt));
+    const charge = add(ZERO, ...vs.map((v) => v.chargeAmt));
     const fee = add(ZERO, ...vs.map((v) => v.feeAmt));
-    if (!isPositive(charge) && !isPositive(fee)) continue;
+    const cot = add(ZERO, ...vs.map((v) => v.cotAmt));
+    if (!isPositive(charge) && !isPositive(fee) && !isPositive(cot)) continue;
     rows.push({
       date: isoDatePart(t.completedAt!),
       txnRef: t.txnRef,
@@ -369,13 +371,15 @@ function charges(db: Db, r: DateRange): Report {
       scenario: scenarioLabel(t.scenarioCode),
       charge,
       fee,
-      total: add(charge, fee),
+      cot,
+      total: add(charge, fee, cot),
     });
   }
   const totals: ReportRow = {
     date: 'Total',
     charge: add(ZERO, ...rows.map((x) => String(x.charge))),
     fee: add(ZERO, ...rows.map((x) => String(x.fee))),
+    cot: add(ZERO, ...rows.map((x) => String(x.cot))),
     total: add(ZERO, ...rows.map((x) => String(x.total))),
   };
   return {
@@ -383,6 +387,7 @@ function charges(db: Db, r: DateRange): Report {
     summary: [
       { label: 'Pre-liquidation charges', value: String(totals.charge), format: 'money' },
       { label: 'Transfer fees', value: String(totals.fee), format: 'money' },
+      { label: 'Commission on turnover', value: String(totals.cot), format: 'money' },
       { label: 'Total income', value: String(totals.total), format: 'money' },
     ],
     columns: [
@@ -392,6 +397,7 @@ function charges(db: Db, r: DateRange): Report {
       { key: 'scenario', label: 'Type', format: 'text' },
       { key: 'charge', label: 'Pre-liq charge', format: 'money' },
       { key: 'fee', label: 'Transfer fee', format: 'money' },
+      { key: 'cot', label: 'COT', format: 'money' },
       { key: 'total', label: 'Total', format: 'money' },
     ],
     rows,
@@ -403,6 +409,7 @@ function charges(db: Db, r: DateRange): Report {
       data: [
         { kind: 'Pre-liquidation charges', amount: num(String(totals.charge)) },
         { kind: 'Transfer fees', amount: num(String(totals.fee)) },
+        { kind: 'COT', amount: num(String(totals.cot)) },
       ],
     },
     notes: [],
@@ -638,10 +645,11 @@ function register(db: Db, r: DateRange): Report {
         wht: sumOf('whtAmt'),
         charge: sumOf('chargeAmt'),
         fee: sumOf('feeAmt'),
+        cot: sumOf('cotAmt'),
         net: sumOf('netAmt'),
       };
     });
-  const money = ['principal', 'interest', 'wht', 'charge', 'fee', 'net'];
+  const money = ['principal', 'interest', 'wht', 'charge', 'fee', 'cot', 'net'];
   const totals: ReportRow = {
     created: 'Total',
     ...Object.fromEntries(money.map((k) => [k, add(ZERO, ...rows.map((x) => String(x[k])))])),
@@ -661,6 +669,7 @@ function register(db: Db, r: DateRange): Report {
       { key: 'wht', label: 'WHT', format: 'money' },
       { key: 'charge', label: 'Charge', format: 'money' },
       { key: 'fee', label: 'Fee', format: 'money' },
+      { key: 'cot', label: 'COT', format: 'money' },
       { key: 'net', label: 'Net', format: 'money' },
     ],
     rows,

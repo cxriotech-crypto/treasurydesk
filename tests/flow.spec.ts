@@ -4,6 +4,7 @@ import {
   collectConsoleErrors,
   fastDemo,
   login,
+  recordPayment,
   sign,
   switchTo,
 } from './helpers';
@@ -121,7 +122,9 @@ test.describe('Transaction flows', () => {
     await expect(page.getByText(/Switched off: Head of Treasury waived it/)).toBeVisible();
     await charge.click();
     await expect(page.getByText(/Pre-liquidation charge \(20%\)/)).toBeVisible();
-    await expect(page.getByRole('switch', { name: 'Deduct withholding tax' })).toHaveCount(0);
+    // The accrued interest is added to the rebooked principal, so WHT applies to it (and can be switched off).
+    await expect(page.getByRole('switch', { name: 'Deduct withholding tax' })).toHaveCount(1);
+    await expect(page.getByText('Add interest (net of WHT)')).toBeVisible();
 
     // Submitted, it goes to the customer's Account Officer first — not to Head of Treasury.
     await signAndSubmit(page);
@@ -189,22 +192,19 @@ test.describe('Transaction flows', () => {
     await sign(page, 'MD');
     await expect(page.getByText('Ready for Operations', { exact: true }).first()).toBeVisible();
 
-    // Operations: one officer keys the posting, a different one approves it.
+    // Operations: one officer pays in GAPS and records it, a different one approves the record.
     await switchTo(page, 'OPS');
-    await page.getByRole('button', { name: 'Key posting' }).first().click();
+    await page.getByRole('button', { name: 'Record payment' }).first().click();
     let drawer = page.getByRole('dialog');
-    await drawer.getByRole('button', { name: 'Use demo reference' }).click();
-    await drawer.getByRole('button', { name: 'Key posting' }).click();
-    await expect(drawer.getByText('Keyed, awaiting a second officer')).toBeVisible({
-      timeout: 20_000,
-    });
-    await expect(drawer.getByRole('button', { name: /^Approve and/ })).toBeDisabled();
+    await expect(drawer.getByText('TreasuryDesk does not send money.')).toBeVisible();
+    await recordPayment(drawer, 'PAID');
+    await expect(drawer.getByRole('button', { name: 'Approve record' })).toBeDisabled();
     await drawer.getByRole('button', { name: 'Close' }).first().click();
 
     await switchTo(page, 'OPS2');
-    await page.getByRole('button', { name: 'Approve posting' }).first().click();
+    await page.getByRole('button', { name: 'Approve payment record' }).first().click();
     drawer = page.getByRole('dialog');
-    await drawer.getByRole('button', { name: /^Approve and/ }).click();
+    await drawer.getByRole('button', { name: 'Approve record' }).click();
     await expect(drawer.getByText('Executed', { exact: true }).first()).toBeVisible({
       timeout: 30_000,
     });
@@ -228,6 +228,7 @@ test.describe('Transaction flows', () => {
     await login(page, 'TO');
     await page.goto('/transactions/new');
     await page.getByRole('radio', { name: /Inflow/ }).click();
+    await page.getByRole('radio', { name: /^A\. New investment/ }).click();
     const combo = page.locator('main input[role="combobox"]');
     await combo.click();
     await page.locator('main [role="option"]').first().click();
@@ -246,66 +247,80 @@ test.describe('Transaction flows', () => {
     });
   });
 
-  test('a failed GAPS payment is keyed again and approved by a second officer', async ({
-    page,
-  }) => {
-    await fastDemo(page, 100); // every GAPS submission fails
+  test('a failed GAPS payment is recorded, confirmed, then paid again', async ({ page }) => {
+    await fastDemo(page);
     await login(page, 'OPS');
     await page.goto('/operations?status=PENDING_OPERATIONS');
     const row = page.locator('main tbody tr', { hasText: 'GAPS' }).first();
     const ref = (await row.locator('td').first().textContent())!.trim();
-    await row.getByRole('button', { name: /Key posting|Key again/ }).click();
+    await row.getByRole('button', { name: /Record payment|Record again/ }).click();
     let drawer = page.getByRole('dialog');
-    await drawer.getByRole('button', { name: 'Use demo reference' }).click();
-    await drawer.getByRole('button', { name: 'Key posting' }).click();
-    await expect(drawer.getByText('Keyed, awaiting a second officer')).toBeVisible({
-      timeout: 20_000,
-    });
+    await recordPayment(drawer, 'FAILED');
     await drawer.getByRole('button', { name: 'Close' }).first().click();
 
     await switchTo(page, 'OPS2');
     await page.goto('/operations');
     await page
       .locator('main tbody tr', { hasText: ref })
-      .getByRole('button', { name: 'Approve posting' })
+      .getByRole('button', { name: 'Approve record' })
       .click();
     drawer = page.getByRole('dialog');
-    await drawer.getByRole('button', { name: /Approve and send to GAPS/ }).click();
-    await expect(drawer.getByText('Last GAPS submission failed')).toBeVisible({ timeout: 40_000 });
-    await drawer.getByRole('button', { name: 'Close' }).first().click();
+    await drawer.getByRole('button', { name: 'Approve record' }).click();
+    await expect(drawer.getByText('Last payment failed')).toBeVisible({ timeout: 20_000 });
+    await drawer
+      .getByRole('button', { name: /Cancel|Close/ })
+      .first()
+      .click();
 
-    await switchTo(page, 'ADM');
-    await page.goto('/settings');
-    await page.getByRole('tab', { name: 'Demo' }).click();
-    await page.getByLabel('GAPS failure rate (%)').fill('0');
-    await page.getByRole('button', { name: 'Save' }).click();
-    await expect(page.getByText('Demo settings saved')).toBeVisible();
-
-    // Keyed again by the first officer, approved again by the second.
+    // Paid again in GAPS: recorded by the first officer, approved by the second.
     await switchTo(page, 'OPS');
     await page.goto('/operations');
     await page
       .locator('main tbody tr', { hasText: ref })
-      .getByRole('button', { name: 'Key again' })
+      .getByRole('button', { name: 'Record again' })
       .click();
     drawer = page.getByRole('dialog');
-    await drawer.getByRole('button', { name: 'Use demo reference' }).click();
-    await drawer.getByRole('button', { name: 'Key posting' }).click();
-    await expect(drawer.getByText('Keyed, awaiting a second officer')).toBeVisible({
-      timeout: 20_000,
-    });
+    await recordPayment(drawer, 'PAID');
     await drawer.getByRole('button', { name: 'Close' }).first().click();
     await switchTo(page, 'OPS2');
     await page.goto('/operations');
     await page
       .locator('main tbody tr', { hasText: ref })
-      .getByRole('button', { name: 'Approve posting' })
+      .getByRole('button', { name: 'Approve record' })
       .click();
     drawer = page.getByRole('dialog');
-    await drawer.getByRole('button', { name: /Approve and send to GAPS/ }).click();
+    await drawer.getByRole('button', { name: 'Approve record' }).click();
     await expect(drawer.getByText('Executed', { exact: true }).first()).toBeVisible({
-      timeout: 40_000,
+      timeout: 30_000,
     });
+  });
+
+  test('an inflow credited to an account goes Treasury Officer → Head of Treasury → Operations', async ({
+    page,
+  }) => {
+    const errors = collectConsoleErrors(page);
+    await fastDemo(page);
+    await login(page, 'TO');
+    const ref = await buildToVoucher(page, /Inflow/, /^B\. Credit to an account/);
+    await page.getByRole('textbox', { name: /^Amount received/ }).fill('3,500,000');
+    await page.getByRole('combobox', { name: /^Credit to/ }).selectOption('PA');
+    await expect(page.getByText('Amount credited')).toBeVisible({ timeout: 20_000 });
+    await page.getByRole('button', { name: 'Sign & submit' }).click();
+    await sign(page, 'TO', 'Sign & submit');
+    // No Account Officer call-back on this route: straight to the Head of Treasury.
+    await expect(page.getByText('Awaiting Head Treasury', { exact: true }).first()).toBeVisible({
+      timeout: 20_000,
+    });
+
+    await switchTo(page, 'HT');
+    await page.getByRole('button', { name: 'Approve & sign' }).first().click();
+    await sign(page, 'HT');
+    await expect(page.getByText('Ready for Operations', { exact: true }).first()).toBeVisible({
+      timeout: 20_000,
+    });
+    await page.getByRole('tab', { name: /Controls/ }).click();
+    await expect(page.getByRole('tabpanel').getByLabel('not required')).toHaveCount(4);
+    expect(errors, `console errors while running ${ref}`).toEqual([]);
   });
 
   test('approvers can bulk approve with one signature', async ({ page }) => {
@@ -347,7 +362,7 @@ test.describe('Transaction flows', () => {
   test('a maturity on a weekend asks to move to the next business day', async ({ page }) => {
     await fastDemo(page);
     await login(page, 'TO');
-    await buildToVoucher(page, /Inflow/);
+    await buildToVoucher(page, /Inflow/, /^A\. New investment/);
     await page.getByLabel('Principal').fill('10,000,000');
     await page.getByLabel('Rate (% p.a.)').fill('15');
     // Effective next Wednesday, and a tenor that lands the maturity on a Saturday.

@@ -68,7 +68,7 @@ export function Timeline({ d }: { d: TxnDetail }) {
             : `Rejected – ${lvl.label}`;
     ev.push({
       at: a.actedAt,
-      title: a.superseded ? `${title} — set aside after a recall` : title,
+      title: a.superseded ? `${title} — set aside` : title,
       by: paper ? `${a.userName} (uploaded by ${d.maker.fullName})` : a.userName,
       tone: a.superseded
         ? 'neutral'
@@ -103,26 +103,41 @@ export function Timeline({ d }: { d: TxnDetail }) {
         note: r.decisionNote || undefined,
       });
   }
+  for (const p of d.paperSignatures)
+    if (p.decidedAt)
+      ev.push({
+        at: p.decidedAt,
+        title:
+          p.status === 'DISPUTED'
+            ? 'Paper signature disputed by the approver'
+            : 'Paper signature confirmed by the approver',
+        by: p.signedByName,
+        tone: p.status === 'DISPUTED' ? 'danger' : 'success',
+        note: p.disputeReason ?? undefined,
+      });
   for (const e of d.executions) {
     ev.push({
       at: e.executedAt,
-      title: 'Posting keyed by Operations',
+      title: e.outcome === 'SUCCESS' ? 'Payment recorded as paid' : 'Payment recorded as failed',
       by: e.executedByName,
-      tone: 'info',
-      note: e.cbsPostingRef ?? undefined,
+      tone: e.outcome === 'SUCCESS' ? 'info' : 'warning',
+      note:
+        [e.cbsPostingRef, e.gapsRef && `GAPS ${e.gapsRef}`, e.failureReason]
+          .filter(Boolean)
+          .join(' · ') || undefined,
     });
     if (e.approvedAt)
       ev.push({
         at: e.approvedAt,
         title:
           e.status === 'SUCCESS'
-            ? 'Posting approved and executed'
+            ? 'Payment record approved – executed'
             : e.status === 'FAILED'
-              ? 'Approved; GAPS submission failed'
-              : 'Posting sent back',
+              ? 'Failed payment confirmed'
+              : 'Payment record sent back',
         by: e.approvedByName ?? '',
         tone: e.status === 'SUCCESS' ? 'success' : e.status === 'FAILED' ? 'danger' : 'warning',
-        note: [e.gapsRef, e.failureReason].filter(Boolean).join(' · ') || undefined,
+        note: e.status === 'RETURNED' ? (e.returnReason ?? undefined) : undefined,
       });
   }
   if (t.completedAt)

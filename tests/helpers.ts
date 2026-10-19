@@ -1,4 +1,4 @@
-import { expect, type Page, type ConsoleMessage } from '@playwright/test';
+import { expect, type ConsoleMessage, type Locator, type Page } from '@playwright/test';
 
 export const DEMO = {
   TO: 'adaeze.okonkwo@fmtfinance.com',
@@ -151,13 +151,35 @@ export async function expectNoHorizontalScroll(page: Page) {
   expect(overflow, 'page should not scroll horizontally').toBeLessThanOrEqual(1);
 }
 
-/** Speed the demo up: no simulated latency, GAPS never fails unless a test asks. */
-export async function fastDemo(page: Page, gapsFailureRate = 0) {
+/** Speed the demo up: no simulated latency. */
+export async function fastDemo(page: Page) {
   await login(page, 'ADM');
   await page.goto('/settings');
   await page.getByRole('tab', { name: 'Demo' }).click();
   await page.getByLabel('Simulated latency (ms)').fill('0');
-  await page.getByLabel('GAPS failure rate (%)').fill(String(gapsFailureRate));
   await page.getByRole('button', { name: 'Save' }).click();
   await expect(page.getByText('Demo settings saved')).toBeVisible();
+}
+
+/**
+ * Operations, first officer: record what happened in GAPS / Eazybankz in the open drawer — paid (with demo
+ * references) or failed (with a reason).
+ */
+export async function recordPayment(drawer: Locator, outcome: 'PAID' | 'FAILED') {
+  if (outcome === 'PAID') {
+    await drawer.getByRole('radio', { name: /^Yes, (paid|posted)$/ }).click();
+    const refs = drawer.getByRole('button', { name: 'Use demo reference' });
+    for (let i = 0; i < (await refs.count()); i++) await refs.nth(i).click();
+  } else {
+    await drawer.getByRole('radio', { name: 'No, it failed' }).click();
+    await drawer.getByLabel('Why it failed').selectOption('Destination bank not available');
+  }
+  await drawer.getByRole('button', { name: 'Record payment' }).click();
+  await expect(
+    drawer.getByText(
+      outcome === 'PAID'
+        ? 'Recorded as paid, awaiting a second officer'
+        : 'Recorded as failed, awaiting a second officer'
+    )
+  ).toBeVisible({ timeout: 20_000 });
 }

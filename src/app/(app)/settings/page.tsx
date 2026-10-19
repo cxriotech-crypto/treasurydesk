@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { Pencil, Play, Plus, RotateCw, Save, Trash2 } from 'lucide-react';
+import { Eraser, Pencil, Play, Plus, RotateCw, Save, Trash2 } from 'lucide-react';
 import type { Bank, IntegrationConfig, PublicHoliday, Settings } from '@/domain/types';
 import { APPROVAL_LEVELS, ROLE_LABELS, ROLE_CODES, type RoleCode } from '@/domain/codes';
 import { DEMO_OTP, DEMO_PIN } from '@/domain/rules';
@@ -155,9 +155,9 @@ function RatesTab({ readOnly }: { readOnly: boolean }) {
               { value: 'GROSS', label: 'On gross accrued interest' },
             ])}
             {choice('partialPreliqInterest', [
-              { value: 'NOT_PAID', label: 'Not paid (SOP example)' },
+              { value: 'CAPITALISED', label: 'Added to the rebooked principal' },
               { value: 'PAID_OUT', label: 'Paid out with the request' },
-              { value: 'CAPITALISED', label: 'Capitalised into the rebooking' },
+              { value: 'NOT_PAID', label: 'Not paid (SOP example)' },
             ])}
             {choice('tpFeeMode', [
               { value: 'DEDUCT', label: 'Deducted from the payment' },
@@ -210,7 +210,6 @@ function RatesTab({ readOnly }: { readOnly: boolean }) {
                     setV({
                       ...DEFAULT_SETTINGS,
                       demoLatencyMs: v.demoLatencyMs,
-                      gapsFailureRate: v.gapsFailureRate,
                     })
                   }
                   disabled={busy}
@@ -932,8 +931,9 @@ function IntegrationsTab({ readOnly }: { readOnly: boolean }) {
   return (
     <div className="space-y-5">
       <InlineAlert tone="info" title="Phase 2">
-        These connections are simulated in the demo. In Phase 2 they become the live Eazybankz,
-        GAPS, NIBSS, Oracle and Active Directory integrations.
+        These connections are simulated in the demo. Payments are never sent from TreasuryDesk:
+        Operations pay in GAPS and record the outcome, which a second officer approves. A live GAPS
+        or NIP connection is out of scope for now.
       </InlineAlert>
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         {(q.data ?? []).map((i) => (
@@ -1060,13 +1060,11 @@ function IntegrationsTab({ readOnly }: { readOnly: boolean }) {
 function DemoTab({ readOnly }: { readOnly: boolean }) {
   const q = useData(() => settingsService.get(), []);
   const [latency, setLatency] = useState('');
-  const [failure, setFailure] = useState('');
   const [busy, setBusy] = useState(false);
-  const [reset, setReset] = useState(false);
+  const [reset, setReset] = useState<'FULL' | 'FRESH' | null>(null);
   useEffect(() => {
     if (q.data) {
       setLatency(String(q.data.values.demoLatencyMs));
-      setFailure(String(q.data.values.gapsFailureRate));
     }
   }, [q.data]);
   if (!q.data) return <SkeletonRows rows={5} />;
@@ -1086,19 +1084,6 @@ function DemoTab({ readOnly }: { readOnly: boolean }) {
               className="num text-right"
             />
           </Field>
-          <Field
-            label={SETTING_META.gapsFailureRate.label}
-            hint={SETTING_META.gapsFailureRate.hint}
-          >
-            <Input
-              inputMode="numeric"
-              disabled={readOnly}
-              value={failure}
-              onChange={(e) => setFailure(e.target.value.replace(/\D/g, ''))}
-              suffix="%"
-              className="num text-right"
-            />
-          </Field>
           {!readOnly ? (
             <div className="flex justify-end sm:col-span-2">
               <Button
@@ -1112,7 +1097,6 @@ function DemoTab({ readOnly }: { readOnly: boolean }) {
                       {
                         ...q.data!.values,
                         demoLatencyMs: Number(latency),
-                        gapsFailureRate: Number(failure),
                       },
                       'Demo settings',
                       q.data!.version
@@ -1137,26 +1121,48 @@ function DemoTab({ readOnly }: { readOnly: boolean }) {
           title="Demo data"
           description={`Seeded for ${formatDate(todayLagos())}. Sign-in code ${DEMO_OTP}, signature PIN ${DEMO_PIN}.`}
         />
-        <CardBody className="flex flex-wrap items-center gap-2">
-          <LinkButton href="/settings/self-check">Run calculation self-check</LinkButton>
-          {!readOnly ? (
-            <Button variant="danger" icon={RotateCw} onClick={() => setReset(true)}>
-              Reset demo data
-            </Button>
-          ) : null}
+        <CardBody className="space-y-3">
+          <ul className="space-y-1 text-[13px] text-muted">
+            <li>
+              <span className="font-medium text-fg">Reset demo data</span>: the full demo, with
+              transactions waiting at every level for each role to work on.
+            </li>
+            <li>
+              <span className="font-medium text-fg">Start fresh</span>: the same customers,
+              investments, accounts and completed history, but nothing in progress — every
+              transaction is yours to raise and take through from the start.
+            </li>
+          </ul>
+          <div className="flex flex-wrap items-center gap-2">
+            <LinkButton href="/settings/self-check">Run calculation self-check</LinkButton>
+            {!readOnly ? (
+              <>
+                <Button icon={Eraser} onClick={() => setReset('FRESH')}>
+                  Start fresh
+                </Button>
+                <Button variant="danger" icon={RotateCw} onClick={() => setReset('FULL')}>
+                  Reset demo data
+                </Button>
+              </>
+            ) : null}
+          </div>
         </CardBody>
       </Card>
 
       <ConfirmDialog
-        open={reset}
-        onClose={() => setReset(false)}
-        title="Reset demo data?"
-        description="Everything created during this demo is replaced with a fresh seed for today."
-        confirmLabel="Reset demo data"
+        open={reset !== null}
+        onClose={() => setReset(null)}
+        title={reset === 'FRESH' ? 'Start fresh?' : 'Reset demo data?'}
+        description={
+          reset === 'FRESH'
+            ? 'Everything created during this demo is removed. Customers, investments, accounts and completed history stay; nothing is left in progress.'
+            : 'Everything created during this demo is replaced with the full demo seed for today.'
+        }
+        confirmLabel={reset === 'FRESH' ? 'Start fresh' : 'Reset demo data'}
         tone="danger"
         onConfirm={async () => {
-          await settingsService.resetDemoData();
-          toast.success('Demo data reset');
+          await settingsService.resetDemoData(reset === 'FRESH');
+          toast.success(reset === 'FRESH' ? 'Started fresh' : 'Demo data reset');
         }}
       />
     </div>

@@ -182,14 +182,22 @@ export function DataTable<T>({
                   <input
                     type="checkbox"
                     aria-label="Select row"
-                    className="form-checkbox mt-1 h-5 w-5 rounded border-border-strong text-brand"
+                    className="form-checkbox mt-1 h-5 w-5 rounded border-border-strong text-brand disabled:cursor-not-allowed disabled:opacity-30"
                     disabled={!isSelectable(r)}
                     checked={selected?.has(id) ?? false}
                     onChange={() => toggleRow(id)}
                   />
                 ) : null}
                 {href ? (
-                  <Link href={href} className="block min-w-0 flex-1">
+                  <Link
+                    href={href}
+                    className="block min-w-0 flex-1"
+                    onClick={(e) => {
+                      // A button or link inside the card does its own thing, not open the row.
+                      const hit = (e.target as HTMLElement).closest('a,button,input,select,label');
+                      if (hit && hit !== e.currentTarget) e.preventDefault();
+                    }}
+                  >
                     {inner}
                   </Link>
                 ) : onRowClick ? (
@@ -286,7 +294,7 @@ export function DataTable<T>({
                         <input
                           type="checkbox"
                           aria-label="Select row"
-                          className="form-checkbox h-4 w-4 rounded border-border-strong text-brand"
+                          className="form-checkbox h-4 w-4 rounded border-border-strong text-brand disabled:cursor-not-allowed disabled:opacity-30"
                           disabled={!isSelectable(r)}
                           checked={selected?.has(id) ?? false}
                           onChange={() => toggleRow(id)}

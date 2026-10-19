@@ -17,14 +17,21 @@ import type {
   TxnInput,
 } from '@/domain/types';
 import type {
+  AccountProductCode,
   AnnivFreq,
+  CreditTarget,
   MandateRule,
   ProductCode,
   RoleCode,
   ScenarioCode,
   SignClass,
 } from '@/domain/codes';
-import { SCENARIO_META } from '@/domain/codes';
+import {
+  ACCOUNT_NO_PREFIX,
+  GAPS_FAILURE_REASONS,
+  SCENARIO_META,
+  chainLevels,
+} from '@/domain/codes';
 import { DEFAULT_SETTINGS, interest, maturityDate } from '@/lib/calc';
 import {
   addDays,
@@ -299,6 +306,8 @@ function rate(rng: Rng, lo = 12, hi = 24): string {
 
 export interface SeedOptions {
   nowMs?: number;
+  /** Completed history and reference data only: no transactions in progress. */
+  fresh?: boolean;
 }
 
 export function buildSeed(opts: SeedOptions = {}): Db {
@@ -313,11 +322,11 @@ export function buildSeed(opts: SeedOptions = {}): Db {
     updatedBy: wf.SYSTEM_USER_ID,
   };
   const db = emptyDb(settings, T, anchor);
-  runWithDb(db, () => populate(db, T, anchor));
+  runWithDb(db, () => populate(db, T, anchor, !!opts.fresh));
   return db;
 }
 
-function populate(db: Db, T: string, anchor: string) {
+function populate(db: Db, T: string, anchor: string, fresh: boolean) {
   const rng = createRng(SEED_NUMBER);
   const goLive = lagosDateTime(addDays(T, -400), '08:00');
   const sys: Ctx = { userId: wf.SYSTEM_USER_ID, at: goLive };
@@ -469,11 +478,14 @@ function populate(db: Db, T: string, anchor: string) {
           : 'ANY_TWO';
     insert(db, 'mandates', { customerId: c.id, ruleCode, effectiveDate: isoDatePart(c.createdAt) });
     const opened = isoDatePart(c.createdAt);
-    for (const productCode of ['SS', 'PA'] as const) {
-      const bal = amountBetween(rng, productCode === 'PA' ? 2_000_000 : 200_000, 150_000_000, 1000);
+    // Every customer has Savings and a Personal Account; companies (and every third individual) a Current account.
+    const products: AccountProductCode[] =
+      customerType === 'CORP' || nameIdx % 3 === 0 ? ['SS', 'PA', 'CA'] : ['SS', 'PA'];
+    for (const productCode of products) {
+      const bal = amountBetween(rng, productCode === 'SS' ? 200_000 : 2_000_000, 150_000_000, 1000);
       insert(db, 'accounts', {
         customerId: c.id,
-        accountNo: nuban(productCode === 'PA' ? '10' : '20'),
+        accountNo: nuban(ACCOUNT_NO_PREFIX[productCode]),
         accountName: customerName,
         productCode,
         ledgerBal: bal,
@@ -487,6 +499,8 @@ function populate(db: Db, T: string, anchor: string) {
     db.accounts.find((a) => a.customerId === c.id && a.productCode === 'PA')!;
   const ss = (c: Customer) =>
     db.accounts.find((a) => a.customerId === c.id && a.productCode === 'SS')!;
+  const ca = (c: Customer) =>
+    db.accounts.find((a) => a.customerId === c.id && a.productCode === 'CA');
 
   // Beneficiaries: 20 external, 5 internal.
   for (let i = 0; i < 25; i++) {
@@ -601,13 +615,13 @@ function populate(db: Db, T: string, anchor: string) {
   };
   const within7 = windowDays(1, 7);
   const within30 = windowDays(8, 30);
-  for (let i = 0; i < 6; i++) buckets.today.push(mkInv({ customer: cust(), ...effFor(T) }));
-  for (let i = 0; i < 18; i++)
+  for (let i = 0; i < 10; i++) buckets.today.push(mkInv({ customer: cust(), ...effFor(T) }));
+  for (let i = 0; i < 34; i++)
     buckets.next7.push(mkInv({ customer: cust(), ...effFor(within7[i % within7.length]) }));
   for (let i = 0; i < 30; i++)
     buckets.next30.push(mkInv({ customer: cust(), ...effFor(within30[i % within30.length]) }));
-  // 11: one is rolled over by a seeded transaction, leaving 10 awaiting instruction.
-  for (let i = 0; i < 11; i++) {
+  // 21: one is rolled over by a seeded transaction, leaving 20 awaiting instruction.
+  for (let i = 0; i < 21; i++) {
     buckets.matured.push(
       mkInv({
         customer: cust(),
@@ -616,7 +630,7 @@ function populate(db: Db, T: string, anchor: string) {
       })
     );
   }
-  for (let i = 0; i < 15; i++) {
+  for (let i = 0; i < 24; i++) {
     const freq = rng.pick([30, 60, 90] as const);
     const next = addDays(T, i % 14);
     const k = rng.int(1, 2);
@@ -638,7 +652,7 @@ function populate(db: Db, T: string, anchor: string) {
       })
     );
   }
-  for (let i = 0; i < 12; i++) {
+  for (let i = 0; i < 24; i++) {
     const tenor = rng.pick([180, 270, 365]);
     const m = addDays(T, rng.int(35, tenor - 5));
     const eff = addDays(m, -tenor);
@@ -780,7 +794,19 @@ function populate(db: Db, T: string, anchor: string) {
     return mkInv({ customer: c, ...effFor(D) });
   };
 
+  /** The officer's inputs, plus the COT rate they choose where commission on turnover applies. */
   const baseInput = (
+    scenario: ScenarioCode,
+    s: ReturnType<Plan['subject']>,
+    day: string
+  ): TxnInput => {
+    const input = scenarioInput(scenario, s, day);
+    const cotApplies =
+      SCENARIO_META[scenario].payout &&
+      (s.account?.productCode === 'CA' || s.investment?.productCode === 'CALL');
+    return cotApplies ? { ...input, cotRatePerMille: rng.pick(['2', '5']) } : input;
+  };
+  const scenarioInput = (
     scenario: ScenarioCode,
     s: ReturnType<Plan['subject']>,
     day: string
@@ -803,7 +829,10 @@ function populate(db: Db, T: string, anchor: string) {
       case 'ANNIVERSARY':
         return { annivPeriod: (s.investment!.annivFreqDays || 30) as 30 | 60 | 90 };
       case 'THIRD_PARTY':
-        return { valueDate: valueDay, amount: fraction(pa(s.customer).availableBal, 0.15) };
+        return {
+          valueDate: valueDay,
+          amount: fraction((s.account ?? pa(s.customer)).availableBal, 0.15),
+        };
       case 'TRANSFER':
         if (scenario === 'TRANSFER_SS_PA')
           return { valueDate: valueDay, amount: fraction(ss(s.customer).availableBal, 0.4) };
@@ -822,6 +851,25 @@ function populate(db: Db, T: string, anchor: string) {
           newTenorDays: scenario === 'TRANSFER_PA_CALL' ? 30 : rng.pick([90, 180]),
         };
       case 'INFLOW':
+        if (scenario === 'INFLOW_ACCOUNT') {
+          const pick = rng.weighted<CreditTarget>([
+            ['PA', 3],
+            ['SS', 2],
+            ['CA', 2],
+            ['CALL', 1],
+            ['OTHER', 1],
+          ]);
+          const creditTo: CreditTarget = pick === 'CA' && !ca(s.customer) ? 'PA' : pick;
+          return {
+            valueDate: valueDay,
+            amount: amountBetween(rng, 500_000, 40_000_000, 50_000),
+            creditTo,
+            ...(creditTo === 'CALL' || creditTo === 'OTHER'
+              ? { creditAccountNo: String(rng.int(1_000_000_000, 9_999_999_999)) }
+              : {}),
+            ...(creditTo === 'OTHER' ? { creditOther: 'Loan repayment account' } : {}),
+          };
+        }
         return {
           valueDate: valueDay,
           amount: amountBetween(rng, 5_000_000, 250_000_000, 100_000),
@@ -870,7 +918,12 @@ function populate(db: Db, T: string, anchor: string) {
     if (meta.subject === 'ACCOUNT') {
       const c =
         scenario === 'TRANSFER_SS_PA' ? richCustomer(ss, '1000000') : richCustomer(pa, '3000000');
-      return () => ({ customer: c, account: scenario === 'TRANSFER_SS_PA' ? ss(c) : pa(c) });
+      // Third-party payments go out of a Current account where the customer has one (COT applies).
+      const fromCa = meta.txnType === 'THIRD_PARTY' && !!ca(c) && rng.chance(0.6);
+      return () => ({
+        customer: c,
+        account: scenario === 'TRANSFER_SS_PA' ? ss(c) : fromCa ? ca(c)! : pa(c),
+      });
     }
     if (meta.subject === 'CUSTOMER') {
       const c = cust();
@@ -912,6 +965,7 @@ function populate(db: Db, T: string, anchor: string) {
     ['THIRD_PARTY_INT', 9, {}],
     ['TRANSFER_SS_PA', 6, {}],
     ['TRANSFER_PA_CP', 3, {}],
+    ['INFLOW_ACCOUNT', 2, {}],
   ];
   for (const [scenario, back, extra] of hist) {
     const start = histStart(back);
@@ -930,8 +984,11 @@ function populate(db: Db, T: string, anchor: string) {
 
   // Recent, anchor-relative items (all instructions within the last ~5 hours).
   const recentStart = () => addMinutes(anchor, -rng.int(150, 300));
-  const recent = (scenario: ScenarioCode, target: Target, extra: Partial<Plan> = {}) =>
+  // "Start fresh" keeps the reference data and completed history but nothing in progress.
+  const recent = (scenario: ScenarioCode, target: Target, extra: Partial<Plan> = {}) => {
+    if (fresh) return;
     addPlan({ scenario, target, start: recentStart(), gap: rng.int(5, 9), ...extra }, 'pending');
+  };
 
   recent('ROLLOVER_C', 'EXECUTED');
   recent('TRANSFER_SS_PA', 'EXECUTED');
@@ -1003,6 +1060,11 @@ function populate(db: Db, T: string, anchor: string) {
   recent('MATURITY', 'RETURNED', { recall: 'MAKER', stopAt: 4 });
   recent('TRANSFER_PA_CP', 'REJECTED', { stopAt: 3 });
   recent('INFLOW', 'CANCELLED');
+  // Inflows credited to an account: Treasury Officer → Head of Treasury → Operations.
+  recent('INFLOW_ACCOUNT', 'PENDING_HEAD_TREASURY');
+  recent('INFLOW_ACCOUNT', 'PENDING_HEAD_TREASURY');
+  recent('INFLOW_ACCOUNT', 'PENDING_OPERATIONS');
+  recent('INFLOW_ACCOUNT', 'VERIFICATION');
   // A second batch: two items, both still with their Account Officers.
   recent('TRANSFER_SS_PA', 'PENDING_ACCOUNT_OFFICER', { batchKey: 'B2' });
   recent('THIRD_PARTY_EXT', 'PENDING_ACCOUNT_OFFICER', { batchKey: 'B2' });
@@ -1102,7 +1164,7 @@ function populate(db: Db, T: string, anchor: string) {
     push(insAt, () => {
       const txn = findById(db, 'txns', id())!;
       const received = addMinutes(createAt, -rng.int(5, 20));
-      const hasFo = SCENARIO_META[p.scenario].vouchers.includes('FO');
+      const hasFo = SCENARIO_META[p.scenario].payout;
       const external =
         p.scenario === 'THIRD_PARTY_EXT' ||
         (hasFo && p.scenario !== 'THIRD_PARTY_INT' && !!p.external);
@@ -1273,6 +1335,18 @@ function populate(db: Db, T: string, anchor: string) {
             ],
           })
         );
+        // The upload completes the step. The MD later confirms theirs; the Audit one is left for the
+        // signer to answer in the demo.
+        if (lvl === 6) {
+          const wc = at();
+          push(wc, () => {
+            const u = findById(db, 'users', signerAt(lvl))!;
+            const open = db.paperSignatures.find(
+              (x) => x.txnId === id() && x.status === 'RECORDED'
+            )!;
+            wf.confirmPaperSignature(ctxOf(u, wc), open.id);
+          });
+        }
         return;
       }
       push(w, () => {
@@ -1306,8 +1380,10 @@ function populate(db: Db, T: string, anchor: string) {
     };
 
     // Optional earlier cycle: returned at a level, corrected and resubmitted from scratch.
+    const route = chainLevels(p.scenario);
     if (p.returnedOnceAt) {
-      for (let lvl = 2; lvl < p.returnedOnceAt; lvl++) approveLevel(lvl, 'Checked.');
+      for (let lvl = 2; lvl < p.returnedOnceAt; lvl++)
+        if (route.includes(lvl)) approveLevel(lvl, 'Checked.');
       const rw = at();
       decideAt(p.returnedOnceAt, rw, wf.returnToMaker, rng.pick(RETURN_NOTES));
       const rs = at();
@@ -1342,7 +1418,8 @@ function populate(db: Db, T: string, anchor: string) {
     const lastApprove =
       p.target === 'RETURNED' || p.target === 'REJECTED' ? upto - 1 : Math.min(upto - 1, 6);
     for (let lvl = 2; lvl <= lastApprove; lvl++)
-      approveLevel(lvl, lvl === 6 ? 'Approved.' : 'Reviewed – in order.');
+      if (route.includes(lvl))
+        approveLevel(lvl, lvl === Math.max(...route) ? 'Approved.' : 'Reviewed – in order.');
     if (p.recall === 'MAKER') {
       const w = at();
       push(w, () =>
@@ -1374,41 +1451,39 @@ function populate(db: Db, T: string, anchor: string) {
     }
     if (upto < 7 || p.target === 'PENDING_OPERATIONS') continue;
 
-    // Operations: one officer keys the posting, a second approves it.
-    const prepare = (when: string) =>
-      push(when, () => wf.prepareExecution(ctxOf(OPS, when), id(), postingRef(when)));
-    const approveOps = (when: string, fail: boolean) =>
+    // Operations: one officer pays in GAPS and records the outcome, a second approves the record.
+    const record = (when: string, fail: boolean) =>
       push(when, () => {
         const txn = findById(db, 'txns', id())!;
         const needs = wf.gapsRequired(db, txn);
-        wf.approveExecution(
-          ctxOf(OPS2, when),
+        wf.recordExecution(
+          ctxOf(OPS, when),
           id(),
-          needs
-            ? fail
-              ? { ok: false, reason: rng.pick(wf.GAPS_FAILURE_REASONS) }
-              : { ok: true, gapsRef: gapsRef(when) }
-            : null
+          fail
+            ? { outcome: 'FAILED', failureReason: rng.pick([...GAPS_FAILURE_REASONS]) }
+            : {
+                outcome: 'SUCCESS',
+                cbsPostingRef: postingRef(when),
+                gapsRef: needs ? gapsRef(when) : undefined,
+              }
         );
       });
+    const approveOps = (when: string) =>
+      push(when, () => wf.approveExecution(ctxOf(OPS2, when), id()));
     const needsGapsPlan =
       p.scenario === 'THIRD_PARTY_EXT' ||
-      (!!p.external &&
-        SCENARIO_META[p.scenario].vouchers.includes('FO') &&
-        p.scenario !== 'THIRD_PARTY_INT');
-    prepare(at());
+      (!!p.external && SCENARIO_META[p.scenario].payout && p.scenario !== 'THIRD_PARTY_INT');
+    const failing = p.target === 'EXEC_FAILED' || !!p.gapsFailFirst;
+    if (failing && !needsGapsPlan)
+      throw new Error(`Seed: failed-payment plan ${p.key} needs an external payment`);
+    record(at(), p.target === 'EXEC_FAILED' || !!p.gapsFailFirst);
     if (p.target === 'PENDING_OPS_APPROVAL') continue;
-    if (p.target === 'EXEC_FAILED') {
-      if (!needsGapsPlan)
-        throw new Error(`Seed: EXEC_FAILED plan ${p.key} needs an external payment`);
-      approveOps(at(), true);
-      continue;
-    }
+    approveOps(at());
+    if (p.target === 'EXEC_FAILED') continue;
     if (p.gapsFailFirst) {
-      approveOps(at(), true);
-      prepare(at());
+      record(at(), false);
+      approveOps(at());
     }
-    approveOps(at(), false);
     if (p.target === 'EXECUTED') continue;
     const confirmAt = p.breach
       ? lagosDateTime(
@@ -1446,6 +1521,34 @@ function populate(db: Db, T: string, anchor: string) {
       );
     }
   }
+
+  // Internal Audit has reviewed the older part of the trail: most entries verified, two flagged, one of
+  // which was explained and verified; the last week is not reviewed yet.
+  const auditor = users.find((u) => u.roleCode === 'AUD')!;
+  const weekAgo = parseIso(anchor) - 7 * 86_400_000;
+  const older = getDb().audit.filter((e) => parseIso(e.ts) < weekAgo && e.userId !== auditor.id);
+  const pick = (action: string) => older.filter((e) => e.action === action).pop();
+  const flagA = pick('PAPER_SIGNATURE') ?? older[older.length - 1];
+  const flagB = pick('POSTING_RETURNED') ?? pick('RECALL') ?? older[older.length - 2];
+  const reviewAt = addMinutes(anchor, -1);
+  wf.reviewAuditEvents(
+    { userId: auditor.id, at: reviewAt },
+    older.filter((e) => e !== flagA && e !== flagB).map((e) => e.id),
+    'VERIFIED',
+    'Monthly review'
+  );
+  wf.reviewAuditEvents(
+    { userId: auditor.id, at: reviewAt },
+    [flagA.id, flagB.id],
+    'FLAGGED',
+    'Ask the Head of Treasury for the supporting email'
+  );
+  wf.reviewAuditEvents(
+    { userId: auditor.id, at: anchor },
+    [flagB.id],
+    'VERIFIED',
+    'Email received and filed'
+  );
 
   // Housekeeping as of now: overdue actives become MATURED; older notifications read; last logins.
   wf.sweepMaturities({ userId: wf.SYSTEM_USER_ID, at: anchor });

@@ -15,10 +15,11 @@ import type {
   VoucherRowFormat,
 } from '@/domain/types';
 import type { ScenarioCode, VoucherRowKind, VoucherType } from '@/domain/codes';
-import { SCENARIO_META } from '@/domain/codes';
+import { CREDIT_TARGET_LABELS, SCENARIO_META } from '@/domain/codes';
 import { INTERNAL_BANK_CODE, INTERNAL_BANK_NAME } from '@/domain/rules';
 import {
   calcAnniversary,
+  calcCot,
   calcInflow,
   calcMaturity,
   calcPreliqFull,
@@ -27,6 +28,8 @@ import {
   calcRollover,
   calcThirdParty,
   calcTransfer,
+  validateAccountNo,
+  validateAmount,
   validateTransferDate,
   whtOn,
   type CalcEnv,
@@ -36,7 +39,7 @@ import {
 } from '@/lib/calc';
 import { daysBetween, isWeekend, maxDate, nextBusinessDay } from '@/lib/dates';
 import { formatDateWithDay, formatNaira } from '@/lib/format';
-import { ZERO, add, isPositive, toMoney } from '@/lib/money';
+import { ZERO, add, isPositive, sub, toMoney } from '@/lib/money';
 
 export type VoucherDraft = Omit<Voucher, 'id' | 'version' | 'voucherNo' | 'txnId' | 'createdAt'>;
 
@@ -47,7 +50,10 @@ export interface TxnCalcContext {
   sourceAccount?: Account | null;
   /** Customer's PA — destination for internal payouts and CP/CALL funding. */
   customerPa?: Account | null;
-  /** Customer's SS — destination for transfer A is the PA. */
+  /** Customer's Savings account — one destination for an inflow credited to an account. */
+  customerSs?: Account | null;
+  /** Customer's Current account, if they have one. */
+  customerCa?: Account | null;
   instruction?: Instruction | null;
   banks: Bank[];
   /** Reversal: the investment created by the original transaction. */
@@ -86,6 +92,21 @@ export interface TxnComputation {
   maturityPrompt: MaturityPrompt | null;
   /** Short list of the key figures (dashboards, lists, confirmation dialogs). */
   summary: SummaryLine[];
+  /**
+   * Commission on turnover, charged on a debit: money paid out of a Current account or out of a Call placement.
+   * The rate is chosen on each transaction. Null when it does not apply.
+   */
+  cot: { scope: 'CA' | 'CALL'; on: boolean; ratePerMille: string | null; amount: string } | null;
+}
+
+/** Where commission on turnover applies to this transaction, if anywhere. */
+export function cotScope(c: TxnCalcContext): 'CA' | 'CALL' | null {
+  const s = c.txn.scenarioCode;
+  if ((s === 'THIRD_PARTY_EXT' || s === 'THIRD_PARTY_INT') && c.sourceAccount?.productCode === 'CA')
+    return 'CA';
+  if (c.investment?.productCode === 'CALL' && SCENARIO_META[s].vouchers.includes('FO'))
+    return 'CALL';
+  return null;
 }
 
 // ─── Row helpers ─────────────────────────────────────────────────────────────
@@ -140,6 +161,7 @@ function blankVoucher(type: VoucherType, seqNo: number, transferDate: string): V
     whtAmt: ZERO,
     chargeAmt: ZERO,
     feeAmt: ZERO,
+    cotAmt: ZERO,
     netAmt: ZERO,
     rollAmt: ZERO,
     transferDate,
@@ -329,6 +351,64 @@ export function computeTxn(c: TxnCalcContext, baseEnv: CalcEnv): TxnComputation 
       break;
     }
 
+    case 'INFLOW_ACCOUNT': {
+      const eff = i.valueDate ?? c.today;
+      const amtErr = validateAmount(i.amount, 'Amount received');
+      if (amtErr) errors.amount = amtErr;
+      const amount = amtErr ? ZERO : toMoney(i.amount!);
+      const target = i.creditTo;
+      const own =
+        target === 'PA'
+          ? c.customerPa
+          : target === 'SS'
+            ? c.customerSs
+            : target === 'CA'
+              ? c.customerCa
+              : null;
+      let accountNo = '';
+      if (!target) errors.creditTo = 'Choose where the funds are credited';
+      else if (target === 'PA' || target === 'SS' || target === 'CA') {
+        if (own) accountNo = own.accountNo;
+        else
+          errors.creditTo = `${c.customer.customerName} has no active ${CREDIT_TARGET_LABELS[target]}`;
+      } else {
+        accountNo = (i.creditAccountNo ?? '').trim();
+        const accErr = target === 'OTHER' && !accountNo ? null : validateAccountNo(accountNo);
+        if (accErr) errors.creditAccountNo = accErr;
+        if (target === 'OTHER' && !i.creditOther?.trim())
+          errors.creditOther = 'Say what the funds are credited to';
+      }
+      const where = target
+        ? target === 'OTHER'
+          ? (i.creditOther?.trim() ?? 'Other')
+          : CREDIT_TARGET_LABELS[target]
+        : '—';
+      const v = blankVoucher('FI', 1, eff);
+      Object.assign(v, {
+        principalAmt: amount,
+        netAmt: amount,
+        effectiveDate: eff,
+        remarks: withPurpose(
+          i.remarks ?? `Funds received, credited to ${where}${accountNo ? ` ${accountNo}` : ''}`
+        ),
+        rows: [
+          info('Customer', `${c.customer.customerName} (${c.customer.cifNo})`),
+          moneyIn('Amount received', amount),
+          info('Credit to', where),
+          info('Account number', accountNo || '—'),
+          input('Value date', eff, 'date'),
+          total('Amount credited', { value: amount, formula: 'Amount received, credited in full' }),
+        ],
+      });
+      vouchers.push(v);
+      headlineAmt = amount;
+      summary.push(
+        { label: 'Amount', value: amount, format: 'money' },
+        { label: 'Credit to', value: where, format: 'text' }
+      );
+      break;
+    }
+
     case 'MATURITY': {
       const inv = requireInv(c);
       const r = calcMaturity(inv, exempt, env);
@@ -462,6 +542,8 @@ export function computeTxn(c: TxnCalcContext, baseEnv: CalcEnv): TxnComputation 
           money('Less charge', r.charge),
           ...(env.settings.partialPreliqInterest === 'CAPITALISED'
             ? [
+                money('Accrued interest', r.accrued),
+                money(whtLabel(exempt, env, 'WHT on interest'), r.interestWht),
                 money('Add interest (net of WHT)', {
                   value: add(r.accrued.value, `-${r.interestWht.value}`),
                   formula: 'Accrued interest − WHT',
@@ -815,10 +897,6 @@ export function computeTxn(c: TxnCalcContext, baseEnv: CalcEnv): TxnComputation 
     }
   }
 
-  // Sanity: voucher types always match the SOP table.
-  const built = vouchers.map((v) => v.voucherType).join(',');
-  if (built !== types.join(','))
-    throw new Error(`Voucher mismatch for ${s}: ${built} ≠ ${types.join(',')}`);
   vouchers.forEach((v) => {
     if (!v.notes.length && notes.length) v.notes = [...notes];
   });
@@ -842,9 +920,112 @@ export function computeTxn(c: TxnCalcContext, baseEnv: CalcEnv): TxnComputation 
   if (chargeOff && !i.preliqChargeOffReason?.trim())
     errors.preliqChargeOffReason = 'Give a reason for not applying the pre-liquidation charge';
 
-  return { vouchers, headlineAmt, errors, notes, summary, maturityPrompt };
+  // Commission on turnover: rate × amount ÷ 1,000, deducted from what is paid out. It can be switched off
+  // for one transaction with a reason, like the other deductions.
+  let cot: TxnComputation['cot'] = null;
+  const scope = cotScope(c);
+  if (scope) {
+    const on = i.cotOn !== false;
+    const rate = i.cotRatePerMille?.trim() || null;
+    if (on && !rate) errors.cotRatePerMille = 'Choose the COT rate for this transaction';
+    let charged = ZERO;
+    for (const v of vouchers) {
+      if (v.voucherType !== 'FO' || !isPositive(v.netAmt)) continue;
+      const base = scope === 'CA' ? v.principalAmt : v.netAmt;
+      const at = v.rows.map((r) => r.kind).lastIndexOf('total') + 1;
+      if (!on) {
+        v.rows.splice(at, 0, {
+          ...info('COT (not charged)', ZERO, 'money'),
+          ...(i.cotOffReason?.trim() ? { note: `Not charged: ${i.cotOffReason.trim()}` } : {}),
+        });
+        continue;
+      }
+      if (!rate) continue;
+      const r = calcCot(base, rate);
+      Object.assign(errors, r.errors);
+      if (r.errors.cotRatePerMille) continue;
+      const net = sub(v.netAmt, r.cot.value);
+      const paid = scope === 'CA' ? 'To beneficiary after COT' : 'Paid out after COT';
+      v.rows.splice(
+        at,
+        0,
+        money(`COT (₦${rate} per mille)`, r.cot),
+        total(paid, {
+          value: net,
+          formula: `${formatNaira(v.netAmt)} − ${formatNaira(r.cot.value)} = ${formatNaira(net)}`,
+        })
+      );
+      for (const line of summary)
+        if (
+          line.value === v.netAmt &&
+          ['To beneficiary', 'Payout', 'Net payable'].includes(line.label)
+        )
+          line.value = net;
+      v.cotAmt = r.cot.value;
+      v.netAmt = net;
+      if (v.payment) v.payment = { ...v.payment, amount: net };
+      charged = add(charged, r.cot.value);
+    }
+    if (!on && !i.cotOffReason?.trim())
+      errors.cotOffReason = 'Give a reason for not charging commission on turnover';
+    if (isPositive(charged)) summary.push({ label: 'COT', value: charged, format: 'money' });
+    cot = { scope, on, ratePerMille: rate, amount: charged };
+  }
+
+  // One voucher per transaction: a transaction that both pays out and rolls over (rollover B, C and D, partial
+  // pre-liquidation) carries both parts on a single voucher, each under its own heading.
+  const issued = vouchers.length > 1 ? [mergeVouchers(vouchers, types[0])] : vouchers;
+  const built = issued.map((v) => v.voucherType).join(',');
+  if (built !== types.join(','))
+    throw new Error(`Voucher mismatch for ${s}: ${built} ≠ ${types.join(',')}`);
+
+  return { vouchers: issued, headlineAmt, errors, notes, summary, maturityPrompt, cot };
+}
+
+const section = (label: string): VoucherRow => ({
+  label,
+  value: '',
+  format: 'text',
+  kind: 'section',
+});
+
+/** Combine a payout part and a roll-over part into the one voucher the transaction issues. */
+function mergeVouchers(parts: VoucherDraft[], type: VoucherType): VoucherDraft {
+  const fo = parts.find((v) => v.voucherType === 'FO')!;
+  const ro = parts.find((v) => v.voucherType === 'RO')!;
+  const rolloverFirst = parts[0] === ro;
+  const payoutTitle = type === 'FO' ? 'Pre-liquidation' : 'Payout';
+  const rolloverTitle = type === 'FO' ? 'Rebooking' : 'Roll-over';
+  const payoutRows = [section(payoutTitle), ...fo.rows];
+  const rolloverRows = [section(rolloverTitle), ...ro.rows];
+  return {
+    ...ro,
+    seqNo: 1,
+    voucherType: type,
+    // The investment's principal on a roll-over voucher; the amount taken out on a pre-liquidation voucher.
+    principalAmt: type === 'FO' ? fo.principalAmt : ro.principalAmt,
+    interestAmt: add(fo.interestAmt, ro.interestAmt),
+    whtAmt: add(fo.whtAmt, ro.whtAmt),
+    // Both parts show the pre-liquidation charge; it is taken once.
+    chargeAmt: isPositive(fo.chargeAmt) ? fo.chargeAmt : ro.chargeAmt,
+    feeAmt: fo.feeAmt,
+    cotAmt: fo.cotAmt,
+    netAmt: fo.netAmt,
+    transferDate: fo.transferDate,
+    payment: fo.payment,
+    remarks: [rolloverFirst ? ro.remarks : fo.remarks, rolloverFirst ? fo.remarks : ro.remarks]
+      .filter(Boolean)
+      .join('. '),
+    notes: [...new Set([...fo.notes, ...ro.notes])],
+    rows: rolloverFirst ? [...rolloverRows, ...payoutRows] : [...payoutRows, ...rolloverRows],
+  };
 }
 
 export function scenarioHasPayout(s: ScenarioCode): boolean {
-  return SCENARIO_META[s].vouchers.includes('FO');
+  return SCENARIO_META[s].payout;
+}
+
+/** The voucher carries money paid out (a payment section): a funds-out voucher, or a roll-over that also pays. */
+export function paysOut(v: Pick<Voucher, 'voucherType' | 'payment'>): boolean {
+  return v.voucherType === 'FO' || (v.voucherType === 'RO' && !!v.payment);
 }

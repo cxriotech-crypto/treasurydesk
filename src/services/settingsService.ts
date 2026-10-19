@@ -7,6 +7,7 @@ import { writeAudit } from '@/data/audit';
 import { AppError, getById, update } from '@/data/repo';
 import { USE_MOCK, ctx, http, run } from './core';
 import { auditedUpdate, fieldErrors } from './crud';
+import { ports } from './ports';
 import { EDITABLE_STATUSES, computeFor } from './workflow';
 
 /** Label + one-line explanation per setting (shown in Settings with a live example). */
@@ -46,7 +47,7 @@ export const SETTING_META: Record<
   },
   partialPreliqInterest: {
     label: 'Interest on partial pre-liquidation',
-    hint: 'Not paid (SOP example), paid out with the requested amount, or capitalised into the rebooking.',
+    hint: 'Added to the principal of the rebooked investment (client instruction), paid out with the requested amount, or not paid (SOP example).',
     group: 'RATES',
   },
   tpFeeMode: {
@@ -84,11 +85,6 @@ export const SETTING_META: Record<
     hint: 'Delay added to every demo service call.',
     group: 'DEMO',
   },
-  gapsFailureRate: {
-    label: 'GAPS failure rate (%)',
-    hint: 'Share of simulated GAPS submissions that fail.',
-    group: 'DEMO',
-  },
 };
 
 export interface SettingsUpdateResult {
@@ -109,7 +105,8 @@ export interface SettingsService {
     version: number
   ): Promise<IntegrationConfig>;
   testIntegration(id: string): Promise<IntegrationConfig>;
-  resetDemoData(): Promise<void>;
+  /** Full demo data, or `fresh`: reference data and completed history with nothing in progress. */
+  resetDemoData(fresh?: boolean): Promise<void>;
 }
 
 function validate(v: Settings) {
@@ -128,8 +125,6 @@ function validate(v: Settings) {
   if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(v.slaCutoff)) e.slaCutoff = 'Use HH:mm';
   if (!Number.isInteger(v.demoLatencyMs) || v.demoLatencyMs < 0 || v.demoLatencyMs > 3000)
     e.demoLatencyMs = 'Enter 0–3000 ms';
-  if (!Number.isInteger(v.gapsFailureRate) || v.gapsFailureRate < 0 || v.gapsFailureRate > 100)
-    e.gapsFailureRate = 'Enter 0–100';
   fieldErrors(e);
 }
 
@@ -210,30 +205,44 @@ export const mockSettingsService: SettingsService = {
         )
       );
     }),
-  testIntegration: (id) =>
-    run(() => {
+  testIntegration: async (id) => {
+    const it = await run(() => {
+      ctx(['ADM']);
+      return getById(getDb(), 'integrations', id, 'integration');
+    });
+    const port =
+      it.code === 'EAZYBANKZ'
+        ? ports().coreBanking
+        : it.code === 'GAPS' || it.code === 'NIP'
+          ? ports().payments
+          : null;
+    const h = port
+      ? await port.health(it).catch((e: Error) => ({ ok: false, ms: null, detail: e.message }))
+      : it.enabled
+        ? { ok: true, ms: 120 + ((it.endpoint.length * 37 + Date.now()) % 600), detail: '' }
+        : { ok: false, ms: null, detail: 'disabled' };
+    const detail = h.detail || (h.ok ? `OK in ${h.ms} ms (simulated)` : 'disabled');
+    return run(() => {
       const c = ctx(['ADM']);
-      const it = getById(getDb(), 'integrations', id, 'integration');
-      const ms = 120 + ((it.endpoint.length * 37 + Date.now()) % 600);
       return mutate((db) =>
         auditedUpdate(
           db,
           c,
           'integrations',
           id,
-          { lastTestAt: nowIso(), lastTestOk: it.enabled, lastTestMs: it.enabled ? ms : null },
+          { lastTestAt: nowIso(), lastTestOk: h.ok, lastTestMs: h.ok ? h.ms : null },
           undefined,
           'Integration',
-          (i) =>
-            `Connection test to ${i.name}: ${it.enabled ? `OK in ${ms} ms (simulated)` : 'disabled'}`,
+          (i) => `Connection test to ${i.name}: ${detail}`,
           'TEST'
         )
       );
-    }, 900),
-  resetDemoData: () =>
+    });
+  },
+  resetDemoData: (fresh = false) =>
     run(() => {
       const c = ctx(['ADM']);
-      resetDemoData();
+      resetDemoData(fresh);
       mutate((db) =>
         writeAudit(
           db,
@@ -242,7 +251,9 @@ export const mockSettingsService: SettingsService = {
             entity: 'System',
             entityId: 'DEMO',
             action: 'RESET',
-            summary: 'Demo data reset to the seed',
+            summary: fresh
+              ? 'Demo data reset to a fresh start (nothing in progress)'
+              : 'Demo data reset to the seed',
           }
         )
       );
@@ -257,7 +268,7 @@ export const httpSettingsService: SettingsService = {
   integrations: () => http.get('/integrations'),
   updateIntegration: (id, patch, version) => http.put(`/integrations/${id}`, { ...patch, version }),
   testIntegration: (id) => http.post(`/integrations/${id}/test`),
-  resetDemoData: () => http.post('/demo/reset'),
+  resetDemoData: (fresh = false) => http.post('/demo/reset', { fresh }),
 };
 
 export const settingsService: SettingsService = USE_MOCK

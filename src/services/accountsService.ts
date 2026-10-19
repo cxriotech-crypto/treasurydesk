@@ -1,5 +1,6 @@
 import type { Account, ListQuery, ListResult } from '@/domain/types';
 import {
+  ACCOUNT_NO_PREFIX,
   ACCOUNT_PRODUCT_LABELS,
   type AccountProductCode,
   type RecordStatus,
@@ -99,7 +100,7 @@ export const mockAccountsService: AccountsService = {
       const db = getDb();
       const cust = getById(db, 'customers', customerId, 'customer');
       const e: Record<string, string> = {};
-      if (!['SS', 'PA'].includes(productCode)) e.productCode = 'Choose SS or PA';
+      if (!(productCode in ACCOUNT_PRODUCT_LABELS)) e.productCode = 'Choose SS, PA or CA';
       if (!isValidMoney(openingBalance) || lt(openingBalance, 0))
         e.openingBalance = 'Enter an amount of zero or more';
       fieldErrors(e);
@@ -107,7 +108,7 @@ export const mockAccountsService: AccountsService = {
         let n = nextCounter(d, `nuban:${productCode}`);
         let no = '';
         do {
-          no = `${productCode === 'PA' ? '10' : '20'}${String((n * 7_919_573) % 100_000_000).padStart(8, '0')}`;
+          no = `${ACCOUNT_NO_PREFIX[productCode]}${String((n * 7_919_573) % 100_000_000).padStart(8, '0')}`;
           n += 1;
         } while (d.accounts.some((a) => a.accountNo === no));
         const bal = toMoney(openingBalance);

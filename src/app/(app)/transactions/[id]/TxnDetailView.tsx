@@ -5,10 +5,10 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   CheckCircle2,
+  ClipboardCheck,
   CornerUpLeft,
   FilePenLine,
   FileSignature,
-  KeyRound,
   Layers,
   MoreHorizontal,
   PenLine,
@@ -25,6 +25,7 @@ import {
   CHANNEL_LABELS,
   PENDING_APPROVAL_STATUSES,
   SCENARIO_META,
+  chainLevels,
   VOUCHER_TYPE_META,
   levelForStatus,
   scenarioLabel,
@@ -96,11 +97,19 @@ const yes = (v: boolean | undefined) => (v ? <Badge tone="success">Yes</Badge> :
 function Summary({ d }: { d: TxnDetail }) {
   const t = d.txn;
   const figures = d.vouchers.length
-    ? d.vouchers.map((v) => ({
-        label: `${VOUCHER_TYPE_META[v.voucherType].label} ${v.voucherNo}`,
-        value:
-          v.voucherType === 'RO' ? v.rollAmt : v.voucherType === 'FO' ? v.netAmt : v.principalAmt,
-      }))
+    ? d.vouchers.flatMap((v) => [
+        {
+          label: `${VOUCHER_TYPE_META[v.voucherType].label} ${v.voucherNo}`,
+          value:
+            v.voucherType === 'RO' ? v.rollAmt : v.voucherType === 'FO' ? v.netAmt : v.principalAmt,
+        },
+        // One voucher that both rolls over and pays out (or pays out and rebooks) shows both figures.
+        ...(v.voucherType === 'RO' && v.payment
+          ? [{ label: 'Paid out', value: v.netAmt }]
+          : v.voucherType === 'FO' && v.newRate && Number(v.rollAmt) > 0
+            ? [{ label: 'Rebooked', value: v.rollAmt }]
+            : []),
+      ])
     : (d.computation?.summary ?? [])
         .filter((s) => s.format === 'money')
         .map((s) => ({ label: s.label, value: s.value }));
@@ -322,7 +331,7 @@ function Verification({ d }: { d: TxnDetail }) {
             label: 'Confirmed in Eazybankz',
             value: v?.cbsConfirmed ? `Yes · synced ${formatDateTime(v.cbsSyncedAt)}` : 'No',
           },
-          ...(d.txn.scenarioCode === 'INFLOW'
+          ...(SCENARIO_META[d.txn.scenarioCode].txnType === 'INFLOW'
             ? [
                 {
                   label: 'Funds received / source confirmed',
@@ -351,6 +360,7 @@ export function TxnDetailView({ id }: { id: string }) {
   const [tab, setTab] = useState<TabKey>('summary');
   const [dialog, setDialog] = useState<Dialog>(null);
   const [recallFor, setRecallFor] = useState<string | null>(null);
+  const [disputeFor, setDisputeFor] = useState<string | null>(null);
   const close = () => setDialog(null);
 
   if (q.error && !q.data) return <ErrorState error={q.error} onRetry={q.reload} />;
@@ -358,6 +368,7 @@ export function TxnDetailView({ id }: { id: string }) {
   const d = q.data;
   const t = d.txn;
   const a = d.actions;
+  const firstApprover = APPROVAL_LEVELS[chainLevels(t.scenarioCode)[1] - 1].label;
   const role = me?.roleCode;
   const pendingApproval = PENDING_APPROVAL_STATUSES.includes(t.status);
   // Notes left by this round's signatures, for whoever receives the transaction next.
@@ -509,11 +520,11 @@ export function TxnDetailView({ id }: { id: string }) {
             {role === 'OPS' && ['PENDING_OPERATIONS', 'EXEC_FAILED'].includes(t.status) ? (
               <Button
                 variant="primary"
-                icon={KeyRound}
+                icon={ClipboardCheck}
                 disabledReason={a.execute}
                 onClick={() => setDialog('execute')}
               >
-                {t.status === 'EXEC_FAILED' ? 'Key posting again' : 'Key posting'}
+                {t.status === 'EXEC_FAILED' ? 'Record new payment' : 'Record payment'}
               </Button>
             ) : null}
             {role === 'OPS' && t.status === 'PENDING_OPS_APPROVAL' ? (
@@ -523,7 +534,7 @@ export function TxnDetailView({ id }: { id: string }) {
                 disabledReason={a.opsApprove}
                 onClick={() => setDialog('execute')}
               >
-                Approve posting
+                Approve payment record
               </Button>
             ) : null}
             {role === 'TO' && t.status === 'EXECUTED' ? (
@@ -595,6 +606,37 @@ export function TxnDetailView({ id }: { id: string }) {
           </InlineAlert>
         </div>
       ) : null}
+      {d.myOpenPaper.map((p) => (
+        <div key={p.id} className="mb-4">
+          <InlineAlert tone="warning" title="Signed on paper in your name">
+            <span className="flex flex-wrap items-center justify-between gap-2">
+              <span>
+                {p.recordedByName} uploaded a voucher signed by you on paper (
+                {formatDateTime(p.recordedAt)}): {p.reason}. The step counts as signed by you. Check
+                the scan on the Documents tab.
+              </span>
+              <span className="flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  onClick={async () => {
+                    try {
+                      await transactionsService.confirmPaperSignature(p.id);
+                      toast.success('Paper signature confirmed');
+                    } catch (e) {
+                      toastError(e);
+                    }
+                  }}
+                >
+                  Yes, I signed it
+                </Button>
+                <Button size="sm" variant="danger" onClick={() => setDisputeFor(p.id)}>
+                  I did not sign it
+                </Button>
+              </span>
+            </span>
+          </InlineAlert>
+        </div>
+      ))}
       {myRequest ? (
         <div className="mb-4">
           <InlineAlert tone="info" title="You asked for a recall">
@@ -606,7 +648,7 @@ export function TxnDetailView({ id }: { id: string }) {
         <div className="mb-4">
           <InlineAlert tone="warning" title={recalled ? 'Recalled' : 'Returned for correction'}>
             {t.returnComment} When it is resubmitted it goes through every level again, starting
-            with the Account Officer.
+            with the {firstApprover}.
           </InlineAlert>
         </div>
       ) : null}
@@ -630,9 +672,15 @@ export function TxnDetailView({ id }: { id: string }) {
       ) : null}
       {t.status === 'PENDING_OPS_APPROVAL' && prepared ? (
         <div className="mb-4">
-          <InlineAlert tone="info" title="Posting keyed, awaiting a second officer">
-            {prepared.executedByName} keyed {prepared.cbsPostingRef} at{' '}
-            {formatDateTime(prepared.executedAt)}. A different Operations officer approves it.
+          <InlineAlert
+            tone={prepared.outcome === 'SUCCESS' ? 'info' : 'warning'}
+            title={`Payment recorded as ${prepared.outcome === 'SUCCESS' ? 'paid' : 'failed'}, awaiting a second officer`}
+          >
+            {prepared.executedByName} recorded it at {formatDateTime(prepared.executedAt)}
+            {prepared.outcome === 'SUCCESS'
+              ? ` (Eazybankz ${prepared.cbsPostingRef}${prepared.gapsRef ? `, GAPS ${prepared.gapsRef}` : ''})`
+              : ` (${prepared.failureReason})`}
+            . A different Operations officer approves the record.
           </InlineAlert>
         </div>
       ) : null}
@@ -657,9 +705,9 @@ export function TxnDetailView({ id }: { id: string }) {
       ) : null}
       {t.status === 'EXEC_FAILED' ? (
         <div className="mb-4">
-          <InlineAlert tone="danger" title="Execution failed">
+          <InlineAlert tone="danger" title="Payment failed">
             {d.executions.filter((e) => e.status === 'FAILED').pop()?.failureReason}. Operations
-            will key it again for a second officer to approve.
+            will pay it again in GAPS and record the outcome for a second officer to approve.
           </InlineAlert>
         </div>
       ) : null}
@@ -694,7 +742,9 @@ export function TxnDetailView({ id }: { id: string }) {
         onClose={close}
         title={`Approve ${t.txnRef}`}
         description={
-          level ? `You are signing at level ${level.levelNo} of 6 (${level.label}).` : undefined
+          level
+            ? `You are signing at level ${chainLevels(t.scenarioCode).indexOf(level.levelNo) + 1} of ${chainLevels(t.scenarioCode).length} (${level.label}).`
+            : undefined
         }
         actionLabel="Approve & sign"
         withComment
@@ -721,7 +771,7 @@ export function TxnDetailView({ id }: { id: string }) {
         open={dialog === 'return'}
         onClose={close}
         title={`Return ${t.txnRef} to the maker?`}
-        description="The Treasury Officer corrects it and resubmits; it then goes through every level again, starting with the Account Officer."
+        description={`The Treasury Officer corrects it and resubmits; it then goes through every level again, starting with the ${firstApprover}.`}
         confirmLabel="Return to maker"
         reason={{ label: 'Comment to the maker', placeholder: 'What needs to be corrected?' }}
         onConfirm={async (c) => {
@@ -782,10 +832,23 @@ export function TxnDetailView({ id }: { id: string }) {
       <AuditVerifyModal d={d} open={dialog === 'auditVerify'} onClose={close} />
       <PaperSignatureModal d={d} open={dialog === 'paper'} onClose={close} />
       <ConfirmDialog
+        open={!!disputeFor}
+        onClose={() => setDisputeFor(null)}
+        title="Dispute the paper signature?"
+        description="Your signature stops counting. If it has not been paid yet, the transaction comes back to you and every later level signs again. Internal Audit, the Head of Treasury and the MD are alerted."
+        confirmLabel="Dispute"
+        tone="danger"
+        reason={{ label: 'What is wrong', placeholder: 'e.g. I did not sign this voucher' }}
+        onConfirm={async (r) => {
+          await transactionsService.disputePaperSignature(disputeFor!, r);
+          toast.success('Paper signature disputed', 'Audit and management have been alerted.');
+        }}
+      />
+      <ConfirmDialog
         open={dialog === 'recall'}
         onClose={close}
         title={`Recall ${t.txnRef}?`}
-        description="It comes back to you, editable. When you resubmit it goes through every level again, starting with the Account Officer."
+        description={`It comes back to you, editable. When you resubmit it goes through every level again, starting with the ${firstApprover}.`}
         confirmLabel="Recall"
         reason={{ label: 'Reason', placeholder: 'Why are you recalling it?' }}
         onConfirm={async (r) => {

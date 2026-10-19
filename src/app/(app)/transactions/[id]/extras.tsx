@@ -128,7 +128,7 @@ export function PaperSignatureModal({
       );
       toast.success(
         `${level?.label} signature recorded`,
-        'Signed on paper; the scan is attached to the transaction.'
+        'The step is complete. The approver has been told and can confirm or dispute it.'
       );
       setSignedBy('');
       setReason('');
@@ -148,7 +148,7 @@ export function PaperSignatureModal({
       onClose={onClose}
       size="lg"
       title={`Record a paper signature — ${level?.label ?? ''}`}
-      description="Use this when the approver cannot sign in TreasuryDesk: print the voucher, have them sign it by hand, then upload the signed copy here."
+      description="Use this when the approver cannot sign in TreasuryDesk: print the voucher, have them sign it by hand, then upload the signed copy here. The step is then complete in their name; they are told and can dispute it if they did not sign."
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>

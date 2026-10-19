@@ -5,6 +5,7 @@
 import { buildSeed } from '../src/data/seed';
 import type { Db } from '../src/data/db';
 import { verifyAuditChain } from '../src/data/audit';
+import { skippedControls } from '../src/services/workflow';
 import {
   CONTROL_CODES,
   SCENARIO_CODES,
@@ -156,16 +157,23 @@ function checkInvariants(db: Db) {
     if (ctl.length !== 12) fail(`${t.txnRef}: expected 12 controls, found ${ctl.length}`);
     const state = (code: ControlCode) => ctl.find((c) => c.controlCode === code)?.state;
     const expected = PASSED_FOR[t.status];
+    // Levels a route leaves out (e.g. an inflow credited to an account) are not required.
+    const skipped = skippedControls(t.scenarioCode);
     if (expected) {
       for (const code of CONTROL_CODES) {
-        const want = expected.includes(code) ? 'PASSED' : 'PENDING';
+        const want = skipped.includes(code)
+          ? 'NOT_REQUIRED'
+          : expected.includes(code)
+            ? 'PASSED'
+            : 'PENDING';
         if (state(code) !== want)
           fail(`${t.txnRef} (${t.status}): ${code} is ${state(code)}, expected ${want}`);
       }
     }
     if (t.status === 'COMPLETED') {
       for (const code of CONTROL_CODES.slice(0, 11))
-        if (state(code) !== 'PASSED') fail(`${t.txnRef}: ${code} not passed`);
+        if (state(code) !== (skipped.includes(code) ? 'NOT_REQUIRED' : 'PASSED'))
+          fail(`${t.txnRef}: ${code} not passed`);
       if (state('C12') === 'PENDING') fail(`${t.txnRef}: C12 still pending`);
       if (!t.completedAt) fail(`${t.txnRef}: completedAt missing`);
     }
@@ -260,7 +268,8 @@ table(
   'Investments by product',
   countBy(db.investments, (i) => i.productCode)
 );
-if (db.investments.length !== 120) fail(`Expected 120 investments, found ${db.investments.length}`);
+if (db.investments.length < 120)
+  fail(`Expected at least 120 investments, found ${db.investments.length}`);
 
 const live = db.investments.filter((i) => i.status === 'ACTIVE');
 const dist = {

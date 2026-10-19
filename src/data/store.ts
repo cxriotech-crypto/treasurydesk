@@ -11,7 +11,7 @@ import { SCHEMA_VERSION, type Db } from './db';
 
 export const STORAGE_KEY = 'treasurydesk.db.v1';
 
-type Seeder = () => Db;
+type Seeder = (opts?: { fresh?: boolean }) => Db;
 
 let db: Db | null = null;
 let lastGood: string | null = null;
@@ -36,9 +36,9 @@ export function registerSeeder(fn: Seeder): void {
   seeder = fn;
 }
 
-function freshSeed(): Db {
+function freshSeed(opts?: { fresh?: boolean }): Db {
   if (!seeder) throw new Error('No seeder registered');
-  return seeder();
+  return seeder(opts);
 }
 
 function load(): Db | null {
@@ -132,8 +132,9 @@ export function runWithDb<T>(target: Db, fn: () => T): T {
   }
 }
 
-export function resetDemoData(): void {
-  db = freshSeed();
+/** Replace the data with a new seed: the full demo, or (fresh) reference data and history with nothing in progress. */
+export function resetDemoData(fresh = false): void {
+  db = freshSeed({ fresh });
   persist();
   emit();
 }

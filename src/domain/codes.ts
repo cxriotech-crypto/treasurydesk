@@ -59,7 +59,7 @@ export const TXN_STATUS_META: Record<TxnStatus, { label: string; owner: RoleCode
       owner: ['OPS'],
       tone: 'accent',
     },
-    EXEC_FAILED: { label: 'Execution failed', owner: ['OPS'], tone: 'danger' },
+    EXEC_FAILED: { label: 'Payment failed', owner: ['OPS'], tone: 'danger' },
     EXECUTED: { label: 'Executed – awaiting confirmation', owner: ['TO'], tone: 'info' },
     COMPLETED: { label: 'Completed', owner: [], tone: 'success' },
     RETURNED: { label: 'Returned for correction', owner: ['TO'], tone: 'warning' },
@@ -190,7 +190,11 @@ export const TXN_TYPE_META: Record<TxnType, { sop: number; label: string; descri
     description: 'Pay a beneficiary from the customer account',
   },
   TRANSFER: { sop: 6, label: 'Transfer', description: 'Move funds between products' },
-  INFLOW: { sop: 7, label: 'Inflow', description: 'Book a new investment' },
+  INFLOW: {
+    sop: 7,
+    label: 'Inflow',
+    description: 'Book a new investment, or credit an account',
+  },
 };
 
 export const VOUCHER_TYPES = ['FI', 'FO', 'RO', 'TS'] as const;
@@ -222,6 +226,7 @@ export const SCENARIO_CODES = [
   'TRANSFER_PA_CALL',
   'TRANSFER_REVERSAL',
   'INFLOW',
+  'INFLOW_ACCOUNT',
 ] as const;
 export type ScenarioCode = (typeof SCENARIO_CODES)[number];
 
@@ -230,7 +235,10 @@ export interface ScenarioMeta {
   letter: string;
   label: string;
   description: string;
+  /** The one voucher issued. A transaction that both pays out and rolls over carries both on one voucher. */
   vouchers: VoucherType[];
+  /** Money leaves to the customer or a beneficiary (a payout or payment section on the voucher). */
+  payout: boolean;
   /** What the wizard asks the maker to pick in step 1. */
   subject: 'INVESTMENT' | 'ACCOUNT' | 'TXN' | 'CUSTOMER';
 }
@@ -242,6 +250,7 @@ export const SCENARIO_META: Record<ScenarioCode, ScenarioMeta> = {
     label: 'Principal + interest',
     description: 'Roll principal and net interest into a new term',
     vouchers: ['RO'],
+    payout: false,
     subject: 'INVESTMENT',
   },
   ROLLOVER_B: {
@@ -249,7 +258,8 @@ export const SCENARIO_META: Record<ScenarioCode, ScenarioMeta> = {
     letter: 'B',
     label: 'Principal rolled, interest paid out',
     description: 'Roll principal; pay net interest to the customer',
-    vouchers: ['RO', 'FO'],
+    vouchers: ['RO'],
+    payout: true,
     subject: 'INVESTMENT',
   },
   ROLLOVER_C: {
@@ -257,7 +267,8 @@ export const SCENARIO_META: Record<ScenarioCode, ScenarioMeta> = {
     letter: 'C',
     label: 'Partial principal',
     description: 'Roll part of the principal; pay out the balance',
-    vouchers: ['RO', 'FO'],
+    vouchers: ['RO'],
+    payout: true,
     subject: 'INVESTMENT',
   },
   ROLLOVER_D: {
@@ -265,7 +276,8 @@ export const SCENARIO_META: Record<ScenarioCode, ScenarioMeta> = {
     letter: 'D',
     label: 'Interest payment only',
     description: 'Pay interest; principal stays invested',
-    vouchers: ['FO', 'RO'],
+    vouchers: ['RO'],
+    payout: true,
     subject: 'INVESTMENT',
   },
   MATURITY: {
@@ -274,6 +286,7 @@ export const SCENARIO_META: Record<ScenarioCode, ScenarioMeta> = {
     label: 'Principal + interest',
     description: 'Terminate at maturity and pay out',
     vouchers: ['FO'],
+    payout: true,
     subject: 'INVESTMENT',
   },
   PRELIQ_FULL: {
@@ -282,6 +295,7 @@ export const SCENARIO_META: Record<ScenarioCode, ScenarioMeta> = {
     label: 'Full',
     description: 'Liquidate fully; charge on accrued interest',
     vouchers: ['FO'],
+    payout: true,
     subject: 'INVESTMENT',
   },
   PRELIQ_PARTIAL: {
@@ -289,7 +303,8 @@ export const SCENARIO_META: Record<ScenarioCode, ScenarioMeta> = {
     letter: '',
     label: 'Partial',
     description: 'Pay part of the principal; rebook the rest',
-    vouchers: ['FO', 'RO'],
+    vouchers: ['FO'],
+    payout: true,
     subject: 'INVESTMENT',
   },
   ANNIVERSARY: {
@@ -298,6 +313,7 @@ export const SCENARIO_META: Record<ScenarioCode, ScenarioMeta> = {
     label: '30 / 60 / 90 days',
     description: 'Pay periodic interest; investment remains active',
     vouchers: ['FO'],
+    payout: true,
     subject: 'INVESTMENT',
   },
   THIRD_PARTY_EXT: {
@@ -306,6 +322,7 @@ export const SCENARIO_META: Record<ScenarioCode, ScenarioMeta> = {
     label: 'External bank',
     description: 'Pay a beneficiary at another bank (transfer charge applies)',
     vouchers: ['FO'],
+    payout: true,
     subject: 'ACCOUNT',
   },
   THIRD_PARTY_INT: {
@@ -314,6 +331,7 @@ export const SCENARIO_META: Record<ScenarioCode, ScenarioMeta> = {
     label: 'Internal account',
     description: 'Pay another customer account in-house (no charge)',
     vouchers: ['FO'],
+    payout: true,
     subject: 'ACCOUNT',
   },
   TRANSFER_SS_PA: {
@@ -322,6 +340,7 @@ export const SCENARIO_META: Record<ScenarioCode, ScenarioMeta> = {
     label: 'Savings → Personal Account',
     description: 'Move funds from SS to PA',
     vouchers: ['TS'],
+    payout: false,
     subject: 'ACCOUNT',
   },
   TRANSFER_PA_CP: {
@@ -330,6 +349,7 @@ export const SCENARIO_META: Record<ScenarioCode, ScenarioMeta> = {
     label: 'Personal Account → Commercial Paper',
     description: 'Invest PA funds in Commercial Paper',
     vouchers: ['TS'],
+    payout: false,
     subject: 'ACCOUNT',
   },
   TRANSFER_PA_CALL: {
@@ -338,6 +358,7 @@ export const SCENARIO_META: Record<ScenarioCode, ScenarioMeta> = {
     label: 'Personal Account → Call Placement',
     description: 'Invest PA funds in a Call Placement',
     vouchers: ['TS'],
+    payout: false,
     subject: 'ACCOUNT',
   },
   TRANSFER_REVERSAL: {
@@ -346,17 +367,48 @@ export const SCENARIO_META: Record<ScenarioCode, ScenarioMeta> = {
     label: 'Reversal',
     description: 'Correct the rate, tenor or amount of a completed booking',
     vouchers: ['TS'],
+    payout: false,
     subject: 'TXN',
   },
   INFLOW: {
     txnType: 'INFLOW',
-    letter: '',
+    letter: 'A',
     label: 'New investment',
     description: 'Book a new investment from customer funds',
     vouchers: ['FI'],
+    payout: false,
+    subject: 'CUSTOMER',
+  },
+  INFLOW_ACCOUNT: {
+    txnType: 'INFLOW',
+    letter: 'B',
+    label: 'Credit to an account',
+    description:
+      'Credit funds received to the customer’s Personal, Savings, Current or Call account, or another account',
+    vouchers: ['FI'],
+    payout: false,
     subject: 'CUSTOMER',
   },
 };
+
+/** Where an inflow credited to an account (Inflow B) goes. */
+export const CREDIT_TARGETS = ['PA', 'SS', 'CA', 'CALL', 'OTHER'] as const;
+export type CreditTarget = (typeof CREDIT_TARGETS)[number];
+export const CREDIT_TARGET_LABELS: Record<CreditTarget, string> = {
+  PA: 'Personal Account',
+  SS: 'Savings account',
+  CA: 'Current account',
+  CALL: 'Call account',
+  OTHER: 'Other',
+};
+
+/**
+ * The approval levels a scenario goes through (1 = Treasury Officer, who always signs first). An inflow credited to
+ * an account needs only the Head of Treasury before Operations; everything else goes through all six levels.
+ */
+export function chainLevels(s: ScenarioCode): number[] {
+  return s === 'INFLOW_ACCOUNT' ? [1, 3] : [1, 2, 3, 4, 5, 6];
+}
 
 export function scenariosForType(t: TxnType): ScenarioCode[] {
   return SCENARIO_CODES.filter((s) => SCENARIO_META[s].txnType === t);
@@ -401,7 +453,8 @@ export const CONTROL_LABELS: Record<ControlCode, string> = {
   C12: 'Transaction completed within GAPS SLA',
 };
 
-export type ControlState = 'PENDING' | 'PASSED' | 'FAILED';
+/** NOT_REQUIRED: an approval level this transaction's route does not include. */
+export type ControlState = 'PENDING' | 'PASSED' | 'FAILED' | 'NOT_REQUIRED';
 
 // ─── Other code sets ─────────────────────────────────────────────────────────
 
@@ -412,10 +465,17 @@ export const PRODUCT_LABELS: Record<ProductCode, string> = {
   CALL: 'Call Placement',
 };
 
-export type AccountProductCode = 'SS' | 'PA';
+export type AccountProductCode = 'SS' | 'PA' | 'CA';
 export const ACCOUNT_PRODUCT_LABELS: Record<AccountProductCode, string> = {
   SS: 'Savings',
   PA: 'Personal Account',
+  CA: 'Current account',
+};
+/** First two digits of a new account number for each account type. */
+export const ACCOUNT_NO_PREFIX: Record<AccountProductCode, string> = {
+  PA: '10',
+  SS: '20',
+  CA: '30',
 };
 
 export type InvestmentStatus =
@@ -461,7 +521,20 @@ export const CALLBACK_OUTCOME_LABELS: Record<CallbackOutcome, string> = {
 };
 export type ApprovalAction = 'APPROVE' | 'RETURN' | 'REJECT' | 'RECALL';
 export type ApprovalChannel = 'APP' | 'PAPER';
-/** PREPARED = keyed by one Operations officer, awaiting a second to approve. */
+/**
+ * PREPARED = the payment outcome was recorded by one Operations officer and awaits a second to approve it.
+ * SUCCESS / FAILED = the record was approved. RETURNED = sent back to be corrected.
+ */
 export type ExecutionStatus = 'PREPARED' | 'SUCCESS' | 'FAILED' | 'RETURNED';
+
+/** Common reasons a GAPS payment fails, offered when Operations record a failure (or type their own). */
+export const GAPS_FAILURE_REASONS = [
+  'Destination bank not available',
+  'Beneficiary account name mismatch',
+  'Invalid beneficiary account number',
+  'Cut-off time passed',
+  'GAPS service unavailable',
+] as const;
 export type AnnivFreq = 0 | 30 | 60 | 90;
-export type VoucherRowKind = 'input' | 'calc' | 'info' | 'total';
+/** `section` heads one part of a voucher that carries two (e.g. the payout and the roll-over). */
+export type VoucherRowKind = 'input' | 'calc' | 'info' | 'total' | 'section';

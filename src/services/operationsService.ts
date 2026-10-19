@@ -5,19 +5,27 @@ import { formatNaira } from '@/lib/format';
 import { add, isPositive, isZero, ZERO } from '@/lib/money';
 import type { Db } from '@/data/db';
 import { getDb } from '@/data/store';
-import { findById, getById, nextCounter, paginate } from '@/data/repo';
-import { USE_MOCK, ctx, http, requireUser, run, runNow, sleep } from './core';
+import { findById, getById, paginate } from '@/data/repo';
+import { USE_MOCK, ctx, http, requireUser, run } from './core';
 import { filterTxns, type TxnRow } from './transactionsService';
 import * as wf from './workflow';
+import { paysOut } from './voucherBuilder';
 
 export interface OpsRow extends TxnRow {
   gapsRequired: boolean;
   attempts: number;
   lastFailure: string | null;
   payoutAmt: string;
-  /** The posting keyed by the first officer, awaiting a second. */
-  prepared: { cbsPostingRef: string; preparedBy: string; preparedAt: string } | null;
-  /** Why the signed-in officer cannot approve the keyed posting, or null. */
+  /** The payment recorded by the first officer, awaiting a second. */
+  prepared: {
+    outcome: 'SUCCESS' | 'FAILED';
+    cbsPostingRef: string;
+    gapsRef: string | null;
+    failureReason: string | null;
+    preparedBy: string;
+    preparedAt: string;
+  } | null;
+  /** Why the signed-in officer cannot approve the payment record, or null. */
   approveBlocker: string | null;
 }
 
@@ -40,21 +48,21 @@ export interface OperationsService {
   ): Promise<OpsQueue>;
   /** Plain-language posting instructions for the Execute drawer. */
   instructions(txnId: string): Promise<string[]>;
-  /** First officer: key the Eazybankz posting reference. Nothing is posted yet. */
-  prepare(txnId: string, cbsPostingRef: string, version?: number): Promise<TreasuryTxn>;
   /**
-   * Second officer: approve the keyed posting, which executes it — sending it to GAPS (simulated,
-   * ~2 s, fails gapsFailureRate% of the time) where money leaves the bank.
+   * First officer: record what happened when they paid in GAPS (or posted in Eazybankz) — references, or the
+   * failure and its reason. TreasuryDesk never sends or holds money.
    */
+  record(txnId: string, rec: wf.PaymentRecord, version?: number): Promise<TreasuryTxn>;
+  /** Second officer: approve the payment record. A successful payment executes the transaction. */
   approve(txnId: string, version?: number): Promise<ExecuteResult>;
-  /** Second officer: send the keyed posting back to be corrected. */
+  /** Second officer: send the payment record back to be corrected. */
   returnPosting(txnId: string, reason: string, version?: number): Promise<TreasuryTxn>;
 }
 
 function payoutOf(db: Db, t: TreasuryTxn): string {
   return add(
     ZERO,
-    ...db.vouchers.filter((v) => v.txnId === t.id && v.voucherType === 'FO').map((v) => v.netAmt)
+    ...db.vouchers.filter((v) => v.txnId === t.id && paysOut(v)).map((v) => v.netAmt)
   );
 }
 
@@ -69,27 +77,48 @@ function describe(db: Db, t: TreasuryTxn, v: Voucher): string[] {
       ? `internal account ${pay.accountNo} (${pay.benefName})`
       : `${pay.benefName}, ${pay.bankName}, account ${pay.accountNo} via GAPS`
     : '';
+  const payoutLines = (): string[] => {
+    const lines: string[] = [];
+    const cot = v.cotAmt ?? ZERO;
+    if (src) {
+      const extras = [
+        isPositive(v.feeAmt) ? `${formatNaira(v.feeAmt)} transfer charge` : '',
+        isPositive(cot) ? `${formatNaira(cot)} COT` : '',
+      ].filter(Boolean);
+      lines.push(
+        `${v.voucherNo}: debit ${src.productCode} ${src.accountNo} with ${formatNaira(add(v.netAmt, v.feeAmt, cot))}${extras.length ? ` (including ${extras.join(' and ')})` : ''}.`
+      );
+    } else if (inv)
+      lines.push(
+        `${v.voucherNo}: debit investment ${inv.investmentRef}${isPositive(v.chargeAmt) ? `, book the ${formatNaira(v.chargeAmt)} pre-liquidation charge to income` : ''}${isPositive(v.whtAmt) ? `, post ${formatNaira(v.whtAmt)} WHT to the WHT payable account` : ''}${isPositive(cot) ? `, book the ${formatNaira(cot)} COT to income` : ''}.`
+      );
+    if (pay && isPositive(v.netAmt)) lines.push(`Pay ${formatNaira(v.netAmt)} to ${dest}.`);
+    return lines;
+  };
+  const rebookLine = (how: 'close' | 'rebook') =>
+    `${v.voucherNo}: ${how === 'close' ? `close ${inv?.investmentRef ?? 'the investment'} and rebook` : 'rebook the remainder,'} ${formatNaira(v.rollAmt)} at ${v.newRate}% for ${v.newTenorDays} days from ${v.effectiveDate} (matures ${v.newMaturityDate}).`;
   switch (v.voucherType) {
     case 'FI':
-      out.push(
-        `${v.voucherNo}: book a new investment of ${formatNaira(v.principalAmt)} at ${v.newRate}% for ${v.newTenorDays} days, effective ${v.effectiveDate}, from funds received.`
-      );
+      if (t.scenarioCode === 'INFLOW_ACCOUNT') {
+        const where = v.rows.find((r) => r.label === 'Credit to')?.value ?? '';
+        const acc = v.rows.find((r) => r.label === 'Account number')?.value ?? '';
+        out.push(
+          `${v.voucherNo}: credit ${formatNaira(v.principalAmt)} from funds received to ${where}${acc && acc !== '—' ? ` ${acc}` : ''}, value ${v.effectiveDate}.`
+        );
+      } else
+        out.push(
+          `${v.voucherNo}: book a new investment of ${formatNaira(v.principalAmt)} at ${v.newRate}% for ${v.newTenorDays} days, effective ${v.effectiveDate}, from funds received.`
+        );
       break;
     case 'FO':
-      if (src)
-        out.push(
-          `${v.voucherNo}: debit ${src.productCode} ${src.accountNo} with ${formatNaira(add(v.netAmt, v.feeAmt))}${isPositive(v.feeAmt) ? ` (including ${formatNaira(v.feeAmt)} transfer charge)` : ''}.`
-        );
-      else if (inv)
-        out.push(
-          `${v.voucherNo}: debit investment ${inv.investmentRef}${isPositive(v.chargeAmt) ? `, book the ${formatNaira(v.chargeAmt)} pre-liquidation charge to income` : ''}${isPositive(v.whtAmt) ? `, post ${formatNaira(v.whtAmt)} WHT to the WHT payable account` : ''}.`
-        );
-      if (pay && isPositive(v.netAmt)) out.push(`Pay ${formatNaira(v.netAmt)} to ${dest}.`);
+      out.push(...payoutLines());
+      // Partial pre-liquidation: the same voucher rebooks what remains.
+      if (v.newRate && isPositive(v.rollAmt)) out.push(rebookLine('rebook'));
       break;
     case 'RO':
-      out.push(
-        `${v.voucherNo}: close ${inv?.investmentRef ?? 'the investment'} and rebook ${formatNaira(v.rollAmt)} at ${v.newRate}% for ${v.newTenorDays} days from ${v.effectiveDate} (matures ${v.newMaturityDate}).`
-      );
+      out.push(rebookLine('close'));
+      // Rollover B, C and D: the same voucher also pays out.
+      if (pay && isPositive(v.netAmt)) out.push(...payoutLines());
       break;
     case 'TS':
       if (t.scenarioCode === 'TRANSFER_SS_PA')
@@ -113,16 +142,19 @@ function describe(db: Db, t: TreasuryTxn, v: Voucher): string[] {
   return out;
 }
 
-function gapsRef(db: Db): string {
-  const d = nowIso().slice(0, 10).replace(/-/g, '');
-  return `GAPS-${d}-${String(nextCounter(db, 'gapsRef') % 1_000_000).padStart(6, '0')}`;
-}
-
-/** Whether approving will call GAPS (so the screen can show the 2-second wait). */
-function runNowGapsCheck(txnId: string): boolean {
-  const db = getDb();
-  const t = findById(db, 'txns', txnId);
-  return !!t && wf.gapsRequired(db, t);
+/** The payment record awaiting a second officer, for display. */
+export function preparedOf(db: Db, txnId: string): OpsRow['prepared'] {
+  const prep = wf.preparedPosting(db, txnId);
+  return prep
+    ? {
+        outcome: prep.outcome,
+        cbsPostingRef: prep.cbsPostingRef ?? '',
+        gapsRef: prep.gapsRef,
+        failureReason: prep.failureReason,
+        preparedBy: findById(db, 'users', prep.executedBy)?.fullName ?? prep.executedBy,
+        preparedAt: prep.executedAt,
+      }
+    : null;
 }
 
 function result(txnId: string): ExecuteResult {
@@ -150,20 +182,13 @@ export const mockOperationsService: OperationsService = {
         nowIso()
       ).map((r) => {
         const ex = db.executions.filter((e) => e.txnId === r.id);
-        const prep = wf.preparedPosting(db, r.id);
         return {
           ...r,
           gapsRequired: wf.gapsRequired(db, r),
           attempts: ex.filter((e) => e.status === 'SUCCESS' || e.status === 'FAILED').length,
           lastFailure: ex.filter((e) => e.status === 'FAILED').pop()?.failureReason ?? null,
           payoutAmt: payoutOf(db, r),
-          prepared: prep
-            ? {
-                cbsPostingRef: prep.cbsPostingRef ?? '',
-                preparedBy: findById(db, 'users', prep.executedBy)?.fullName ?? prep.executedBy,
-                preparedAt: prep.executedAt,
-              }
-            : null,
+          prepared: preparedOf(db, r.id),
           approveBlocker: wf.opsApprovalBlocker(db, r as TreasuryTxn, u),
         };
       });
@@ -182,35 +207,17 @@ export const mockOperationsService: OperationsService = {
         .flatMap((v) => describe(db, t, v));
       lines.push(
         wf.gapsRequired(db, t)
-          ? 'Key the Eazybankz posting reference. A second Operations officer approves it, which sends the payment to GAPS.'
-          : 'Internal only: key the Eazybankz posting reference. A second Operations officer approves it to complete execution.'
+          ? 'Post it in Eazybankz and make the payment in GAPS, then record the outcome here: the Eazybankz and GAPS references, or why it failed. A second Operations officer approves the record.'
+          : 'Internal only (no GAPS): post it in Eazybankz, then record the posting reference here. A second Operations officer approves the record.'
       );
       return lines;
     }),
-  prepare: (txnId, cbsPostingRef, version) =>
-    run(() => wf.prepareExecution(ctx(['OPS']), txnId, cbsPostingRef, version)),
-  approve: async (txnId, version) => {
-    const needsGaps = runNowGapsCheck(txnId);
-    if (needsGaps && typeof window !== 'undefined') await sleep(2000);
-    return runNow(() => {
-      const c = ctx(['OPS']);
-      const db = getDb();
-      const t = getById(db, 'txns', txnId, 'transaction');
-      let outcome: wf.GapsOutcome | null = null;
-      if (wf.gapsRequired(db, t)) {
-        const fail = Math.random() * 100 < db.settings.values.gapsFailureRate;
-        outcome = fail
-          ? {
-              ok: false,
-              reason:
-                wf.GAPS_FAILURE_REASONS[Math.floor(Math.random() * wf.GAPS_FAILURE_REASONS.length)],
-            }
-          : { ok: true, gapsRef: gapsRef(db) };
-      }
-      wf.approveExecution(c, txnId, outcome, version);
+  record: (txnId, rec, version) => run(() => wf.recordExecution(ctx(['OPS']), txnId, rec, version)),
+  approve: (txnId, version) =>
+    run(() => {
+      wf.approveExecution(ctx(['OPS']), txnId, version);
       return result(txnId);
-    });
-  },
+    }),
   returnPosting: (txnId, reason, version) =>
     run(() => wf.returnExecution(ctx(['OPS']), txnId, reason, version)),
 };
@@ -218,8 +225,7 @@ export const mockOperationsService: OperationsService = {
 export const httpOperationsService: OperationsService = {
   queue: (q) => http.get('/operations/queue', q as Record<string, unknown>),
   instructions: (txnId) => http.get(`/operations/${txnId}/instructions`),
-  prepare: (txnId, cbsPostingRef, version) =>
-    http.post(`/operations/${txnId}/prepare`, { cbsPostingRef, version }),
+  record: (txnId, rec, version) => http.post(`/operations/${txnId}/record`, { ...rec, version }),
   approve: (txnId, version) => http.post(`/operations/${txnId}/approve`, { version }),
   returnPosting: (txnId, reason, version) =>
     http.post(`/operations/${txnId}/return`, { reason, version }),

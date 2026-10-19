@@ -10,6 +10,7 @@
 import type {
   AccountProductCode,
   AccountType,
+  CreditTarget,
   AnnivFreq,
   ApprovalAction,
   ApprovalChannel,
@@ -151,6 +152,12 @@ export interface TxnInput {
   whtOffReason?: string;
   preliqChargeOn?: boolean; // apply the pre-liquidation charge on this transaction
   preliqChargeOffReason?: string;
+  creditTo?: CreditTarget; // Inflow B: where the funds are credited
+  creditAccountNo?: string; // Inflow B: the account credited (Call, overdraft, other)
+  creditOther?: string; // Inflow B: what "Other" is
+  cotOn?: boolean; // charge commission on turnover where it applies (default on)
+  cotRatePerMille?: string; // ₦ per ₦1,000, chosen on each transaction
+  cotOffReason?: string;
   // reversal corrected values
   correctedRate?: Rate;
   correctedTenorDays?: number;
@@ -269,6 +276,8 @@ export interface Voucher extends BaseRecord {
   whtAmt: Money;
   chargeAmt: Money;
   feeAmt: Money;
+  /** Commission on turnover deducted from the payout. */
+  cotAmt: Money;
   netAmt: Money;
   rollAmt: Money;
   transferDate: IsoDate;
@@ -304,14 +313,24 @@ export interface Approval extends BaseRecord {
 export interface Execution extends BaseRecord {
   txnId: string;
   attemptNo: number;
+  /** The Eazybankz posting reference (required when the payment went through). */
   cbsPostingRef: string | null;
+  /** The GAPS payment reference Operations copied from GAPS. */
   gapsRef: string | null;
+  /**
+   * What the recording officer reports happened when they paid in GAPS (or posted in Eazybankz). TreasuryDesk
+   * never sends or holds money; it only records the outcome.
+   */
+  outcome: 'SUCCESS' | 'FAILED';
   status: ExecutionStatus;
+  /** Why the payment failed (e.g. "Destination bank not available"), as recorded. */
   failureReason: string | null;
-  /** The Operations officer who keyed the posting. */
+  /** Why the approving officer sent the record back to be corrected. */
+  returnReason: string | null;
+  /** The Operations officer who recorded the payment. */
   executedBy: string;
   executedAt: IsoDateTime;
-  /** The second Operations officer who approved it; null until approved. */
+  /** The second Operations officer who approved the record; null until approved. */
   approvedBy: string | null;
   approvedAt: IsoDateTime | null;
   confirmedBy: string | null;
@@ -333,6 +352,34 @@ export interface TxnComment extends BaseRecord {
   body: string;
   createdAt: IsoDateTime;
   editedAt: IsoDateTime | null;
+  /** Deleted comments are kept (hidden from the working view, visible to Internal Audit). */
+  deletedAt: IsoDateTime | null;
+  deletedBy: string | null;
+}
+
+/** RECORDED: uploaded and counting; CONFIRMED / DISPUTED: answered by the approver named on it. */
+export type PaperSignatureStatus = 'RECORDED' | 'CONFIRMED' | 'DISPUTED';
+
+/**
+ * A signature on paper, uploaded by the maker for an approver. The upload completes that step (the client's
+ * process); the named approver is told and can confirm it or dispute it.
+ */
+export interface PaperSignature extends BaseRecord {
+  txnId: string;
+  cycleNo: number;
+  levelNo: number;
+  roleCode: RoleCode;
+  /** The approver named as having signed. */
+  signedBy: string;
+  /** The maker who uploaded the scan. */
+  recordedBy: string;
+  recordedAt: IsoDateTime;
+  reason: string;
+  status: PaperSignatureStatus;
+  decidedAt: IsoDateTime | null;
+  disputeReason: string | null;
+  /** The approval the upload created. */
+  approvalId: string | null;
 }
 
 export type AttachmentKind = 'INSTRUCTION' | 'SUPPORTING' | 'PAPER_SIGNATURE';
@@ -343,6 +390,8 @@ export interface Attachment extends BaseRecord {
   kind: AttachmentKind;
   /** The approval a paper signature belongs to. */
   approvalId: string | null;
+  /** The paper signature this scan supports. */
+  paperSignatureId: string | null;
   fileName: string;
   mimeType: string;
   sizeBytes: number;
@@ -350,6 +399,9 @@ export interface Attachment extends BaseRecord {
   dataUrl: string | null;
   uploadedBy: string;
   uploadedAt: IsoDateTime;
+  /** Removed documents are kept (hidden from the working view, visible to Internal Audit). */
+  deletedAt: IsoDateTime | null;
+  deletedBy: string | null;
 }
 
 export type RecallStatus = 'PENDING' | 'ACCEPTED' | 'DECLINED';
@@ -431,6 +483,21 @@ export interface AuditEvent extends BaseRecord {
   hash: string;
 }
 
+export type AuditReviewStatus = 'VERIFIED' | 'FLAGGED' | 'NOT_REVIEWED';
+
+/**
+ * Internal Audit's review of one audit-trail entry. Append-only: the newest row for an entry is its current status,
+ * the older rows its history (e.g. flagged, then verified once explained).
+ */
+export interface AuditReview extends BaseRecord {
+  auditEventId: string;
+  auditSeqNo: number;
+  status: AuditReviewStatus;
+  note: string;
+  reviewedBy: string;
+  reviewedAt: IsoDateTime;
+}
+
 export type WhtBasisPreliq = 'AFTER_CHARGE' | 'GROSS';
 export type PartialPreliqInterest = 'NOT_PAID' | 'PAID_OUT' | 'CAPITALISED';
 export type TpFeeMode = 'DEDUCT' | 'ON_TOP';
@@ -453,7 +520,6 @@ export interface Settings {
   slaHours: number;
   slaCutoff: string; // HH:mm
   demoLatencyMs: number;
-  gapsFailureRate: number;
 }
 
 /** Stored settings row (maps to SYS_SETTING key/value rows in Oracle). */

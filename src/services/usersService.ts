@@ -27,7 +27,7 @@ export const PERMISSIONS: { capability: string; roles: RoleCode[] }[] = [
   { capability: 'Approve level 3 (MIS)', roles: ['MIS'] },
   { capability: 'Approve level 4 (Internal Audit)', roles: ['AUD'] },
   { capability: 'Approve level 5 (Managing Director)', roles: ['MD'] },
-  { capability: 'Execute in Eazybankz / GAPS', roles: ['OPS'] },
+  { capability: 'Record GAPS / Eazybankz payments (two officers)', roles: ['OPS'] },
   { capability: 'Confirm completion and raise reversals', roles: ['TO'] },
   { capability: 'Edit customers and signatories', roles: ['TO', 'ADM'] },
   { capability: 'Manage beneficiaries', roles: ['TO'] },

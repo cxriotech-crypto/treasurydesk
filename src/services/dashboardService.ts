@@ -25,7 +25,8 @@ import { USE_MOCK, http, requireUser, run } from './core';
 import { aumAsOf } from './reportsService';
 import { filterTxns, toTxnRow, type TxnRow } from './transactionsService';
 import type { CallbackQueueRow } from './callbacksService';
-import type { OpsRow } from './operationsService';
+import { preparedOf, type OpsRow } from './operationsService';
+import { paysOut } from './voucherBuilder';
 import * as wf from './workflow';
 
 export interface Point {
@@ -65,7 +66,8 @@ export interface ApproverDashboard {
   approvedToday: number;
   pipeline: Point[];
   byType: Point[];
-  top: TxnRow[];
+  /** The longest-waiting items, with minutes waited. */
+  top: (TxnRow & { waiting: number })[];
   /** MD only. */
   aum?: string;
   inflowsThisMonth?: string;
@@ -196,8 +198,8 @@ function approverDashboard(db: Db, userId: string, role: RoleCode): ApproverDash
   for (const t of done) {
     for (const v of db.vouchers.filter((x) => x.txnId === t.id)) {
       if (v.voucherType === 'FI') inflows = add(inflows, v.principalAmt);
-      if (v.voucherType === 'FO') outflows = add(outflows, v.netAmt);
-      fees = add(fees, add(v.chargeAmt, v.feeAmt));
+      if (paysOut(v)) outflows = add(outflows, v.netAmt);
+      fees = add(fees, v.chargeAmt, v.feeAmt, v.cotAmt);
     }
   }
   const trend: Point[] = [];
@@ -260,9 +262,7 @@ export const mockDashboardService: DashboardService = {
           const payout = (id: string) =>
             add(
               ZERO,
-              ...db.vouchers
-                .filter((v) => v.txnId === id && v.voucherType === 'FO')
-                .map((v) => v.netAmt)
+              ...db.vouchers.filter((v) => v.txnId === id && paysOut(v)).map((v) => v.netAmt)
             );
           return {
             kind: 'OPS' as const,
@@ -280,16 +280,7 @@ export const mockDashboardService: DashboardService = {
                 db.executions.filter((e) => e.txnId === t.id && e.status === 'FAILED').pop()
                   ?.failureReason ?? null,
               payoutAmt: payout(t.id),
-              prepared: (() => {
-                const prep = wf.preparedPosting(db, t.id);
-                return prep
-                  ? {
-                      cbsPostingRef: prep.cbsPostingRef ?? '',
-                      preparedBy: findById(db, 'users', prep.executedBy)?.fullName ?? '',
-                      preparedAt: prep.executedAt,
-                    }
-                  : null;
-              })(),
+              prepared: preparedOf(db, t.id),
               approveBlocker: wf.opsApprovalBlocker(db, t, u),
             })),
           };

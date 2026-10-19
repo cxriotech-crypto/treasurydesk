@@ -7,15 +7,17 @@ import * as S from '../src/services';
 import { getDb } from '../src/data/store';
 import { verifyAuditChain } from '../src/data/audit';
 import {
+  APPROVAL_LEVELS,
   SCENARIO_CODES,
   SCENARIO_META,
+  chainLevels,
   type RoleCode,
   type ScenarioCode,
 } from '../src/domain/codes';
 import { accountIneligibility, investmentIneligibility } from '../src/domain/rules';
 import type { TreasuryTxn, TxnInput } from '../src/domain/types';
 import { isoDatePart, isoTimePart, nextBusinessDay, nowIso, todayLagos } from '../src/lib/dates';
-import { gt, sub } from '../src/lib/money';
+import { add, gt, sub } from '../src/lib/money';
 import { LOCKING_STATUSES } from '../src/services/workflow';
 
 const results: { name: string; ok: boolean; note: string }[] = [];
@@ -116,6 +118,8 @@ function inputFor(s: ScenarioCode, subj: ReturnType<typeof subjectFor>): TxnInpu
       if (s === 'TRANSFER_SS_PA') return { valueDate: bizDay(), amount: '100000.00' };
       return { valueDate: bizDay(), amount: '1000000.00', newRate: '17.50', newTenorDays: 90 };
     case 'INFLOW':
+      if (s === 'INFLOW_ACCOUNT')
+        return { valueDate: bizDay(), amount: '3000000.00', creditTo: 'PA' };
       return {
         valueDate: bizDay(),
         amount: '25000000.00',
@@ -130,6 +134,8 @@ function inputFor(s: ScenarioCode, subj: ReturnType<typeof subjectFor>): TxnInpu
 }
 
 interface RunOpts {
+  /** Called once the transaction is ready to sign (before anything moves). */
+  onPrepared?: (t: TreasuryTxn) => void;
   external?: boolean;
   callbackFailFirst?: boolean;
   returnAtMis?: boolean;
@@ -153,7 +159,8 @@ async function prepareScenario(s: ScenarioCode, o: RunOpts = {}) {
   let t = await S.transactionsService.create({
     scenarioCode: s,
     ...subj,
-    input: inputFor(s, subj),
+    // The COT rate is chosen on each transaction; it only counts where COT applies.
+    input: { ...inputFor(s, subj), ...(SCENARIO_META[s].payout ? { cotRatePerMille: '2' } : {}) },
   });
   const cust = db().customers.find((c) => c.id === subj.customerId)!;
   const now = nowIso();
@@ -192,7 +199,6 @@ async function prepareScenario(s: ScenarioCode, o: RunOpts = {}) {
   });
   await S.transactionsService.refreshFromCbs(t.id);
   await S.transactionsService.confirmCbs(t.id, {
-    cbsSyncedAt: nowIso(),
     fundsReceived: true,
     sourceConfirmed: true,
   });
@@ -212,9 +218,12 @@ async function runScenario(s: ScenarioCode, o: RunOpts = {}): Promise<TreasuryTx
   const prepared = await prepareScenario(s, o);
   const { to, cust } = prepared;
   let t = prepared.t;
+  o.onPrepared?.(t);
+  const route = chainLevels(s);
   t = await S.transactionsService.signAndSubmit(t.id, { signatureName: to.fullName, pin: '1234' });
-  if (t.status !== 'PENDING_ACCOUNT_OFFICER')
-    throw new Error(`${s}: expected to go to the Account Officer, got ${t.status}`);
+  const firstStatus = APPROVAL_LEVELS[route[1] - 1].pendingStatus;
+  if (t.status !== firstStatus)
+    throw new Error(`${s}: expected ${firstStatus} after submission, got ${t.status}`);
 
   // The customer's Account Officer calls, then checks: approve, return or reject.
   const accountOfficerCheck = async () => {
@@ -268,8 +277,11 @@ async function runScenario(s: ScenarioCode, o: RunOpts = {}): Promise<TreasuryTx
     t = await S.approvalsService.approve(t.id, { signatureName: u.fullName, pin: '1234' });
   };
 
-  await accountOfficerCheck();
-  for (const role of ['HT', 'MIS', 'AUD', 'MD'] as RoleCode[]) {
+  if (route.includes(2)) await accountOfficerCheck();
+  const later = APPROVAL_LEVELS.filter((l) => l.levelNo > 2 && route.includes(l.levelNo)).map(
+    (l) => l.roleCode as RoleCode
+  );
+  for (const role of later) {
     if (o.returnAtMis && role === 'MIS' && t.cycleNo === 1) {
       await as('MIS');
       t = await S.approvalsService.returnToMaker(t.id, 'Please correct the remarks');
@@ -290,20 +302,12 @@ async function runScenario(s: ScenarioCode, o: RunOpts = {}): Promise<TreasuryTx
   if (t.status !== 'PENDING_OPERATIONS')
     throw new Error(`${s}: expected PENDING_OPERATIONS, got ${t.status}`);
 
-  // Operations: one officer keys the posting, a different one approves it.
+  // Operations: one officer pays in GAPS and records the outcome, a different one approves the record.
   const [ops1, ops2] = db().users.filter((u) => u.roleCode === 'OPS' && u.status === 'ACTIVE');
-  const setRate = async (rate: number) => {
-    await as('ADM');
-    const st = await S.settingsService.get();
-    await S.settingsService.update(
-      { ...st.values, gapsFailureRate: rate },
-      'Flow check',
-      st.version
-    );
-  };
-  const key = async (ref: string) => {
+  const viaGaps = (await S.transactionsService.get(t.id)).gapsRequired;
+  const record = async (rec: Parameters<typeof S.operationsService.record>[1]) => {
     await as(ops1.id);
-    t = await S.operationsService.prepare(t.id, ref);
+    t = await S.operationsService.record(t.id, rec);
   };
   const approveAsSecond = async () => {
     await as(ops2.id);
@@ -312,24 +316,55 @@ async function runScenario(s: ScenarioCode, o: RunOpts = {}): Promise<TreasuryTx
     return r;
   };
   if (o.gapsFailFirst) {
-    await setRate(100);
-    await key('EZB-FLOW-1');
     await as(ops1.id);
     await expectBlocked(
-      `${s}: the officer who keyed a posting cannot approve it`,
+      `${s}: a failed payment cannot be recorded without a reason`,
+      S.operationsService.record(t.id, { outcome: 'FAILED', failureReason: ' ' })
+    );
+    await record({ outcome: 'FAILED', failureReason: 'Destination bank not available' });
+    await as(ops1.id);
+    await expectBlocked(
+      `${s}: the officer who recorded a payment cannot approve it`,
       S.operationsService.approve(t.id)
     );
     const r = await approveAsSecond();
-    if (r.ok || r.txn.status !== 'EXEC_FAILED') throw new Error(`${s}: GAPS failure not recorded`);
-    await setRate(0);
+    if (r.ok || r.txn.status !== 'EXEC_FAILED')
+      throw new Error(`${s}: failed payment not confirmed`);
+    pass(
+      `${s}: a failed GAPS payment is recorded with its reason`,
+      r.execution.failureReason ?? ''
+    );
+    if (db().executions.some((e) => e.txnId === t.id && e.status === 'SUCCESS'))
+      fail(`${s}: no money effect for a failed payment`, 'a SUCCESS execution exists');
   }
-  await key('EZB-FLOW-2');
+  if (viaGaps) {
+    await as(ops1.id);
+    await expectBlocked(
+      `${s}: a paid GAPS payment needs the GAPS reference`,
+      S.operationsService.record(t.id, { outcome: 'SUCCESS', cbsPostingRef: 'EZB-FLOW-2' })
+    );
+  }
+  await record({
+    outcome: 'SUCCESS',
+    cbsPostingRef: 'EZB-FLOW-2',
+    gapsRef: viaGaps ? 'GAPS-FLOW-2' : undefined,
+  });
+  if (viaGaps) {
+    const m = await as('TO');
+    if (t.makerId === m.id)
+      await expectBlocked(
+        `${s}: the maker cannot recall once Operations recorded it as paid`,
+        S.transactionsService.recall(t.id, 'Too late')
+      );
+  }
   const r = await approveAsSecond();
   if (!r.ok) throw new Error(`${s}: execution did not succeed`);
   await as('TO');
   t = await S.transactionsService.confirmCompletion(t.id);
   const d = await S.transactionsService.get(t.id);
-  const notPassed = d.controls.filter((c) => c.state !== 'PASSED').map((c) => c.controlCode);
+  const notPassed = d.controls
+    .filter((c) => c.state !== 'PASSED' && c.state !== 'NOT_REQUIRED')
+    .map((c) => c.controlCode);
   if (notPassed.length) throw new Error(`${s}: controls not passed: ${notPassed.join(',')}`);
   if (d.vouchers.map((v) => v.voucherType).join('+') !== SCENARIO_META[s].vouchers.join('+'))
     throw new Error(`${s}: wrong vouchers`);
@@ -337,18 +372,14 @@ async function runScenario(s: ScenarioCode, o: RunOpts = {}): Promise<TreasuryTx
 }
 
 async function main() {
-  // Always start from a fresh seed, with GAPS never failing unless a test asks for it.
+  // Always start from a fresh seed, with no simulated latency.
   await as('ADM');
   await S.settingsService.resetDemoData();
   await as('ADM');
   const st = await S.settingsService.get();
-  await S.settingsService.update(
-    { ...st.values, gapsFailureRate: 0, demoLatencyMs: 0 },
-    'Flow check',
-    st.version
-  );
+  await S.settingsService.update({ ...st.values, demoLatencyMs: 0 }, 'Flow check', st.version);
 
-  // 1. All 15 scenarios end to end (inflow first so a reversal target exists).
+  // 1. Every scenario end to end (inflow first so a reversal target exists).
   const order: ScenarioCode[] = ['INFLOW', ...SCENARIO_CODES.filter((s) => s !== 'INFLOW')];
   let completed = 0;
   for (const s of order) {
@@ -360,13 +391,34 @@ async function main() {
         callbackFailFirst: s === 'ANNIVERSARY',
       };
       const beforeInv = db().investments.length;
-      const t = await runScenario(s, opts);
+      let paBefore = '';
+      const t = await runScenario(s, {
+        ...opts,
+        onPrepared: (x) =>
+          (paBefore =
+            db().accounts.find((a) => a.customerId === x.customerId && a.productCode === 'PA')
+              ?.availableBal ?? ''),
+      });
       const d = db();
       let effect = '';
       const orig = d.investments.find((i) => i.id === t.investmentId);
       const created = d.investments.length - beforeInv;
       switch (SCENARIO_META[s].txnType) {
         case 'INFLOW':
+          if (s === 'INFLOW_ACCOUNT') {
+            const pa = d.accounts.find(
+              (a) => a.customerId === t.customerId && a.productCode === 'PA'
+            )!;
+            if (created !== 0) throw new Error('a credit to an account created an investment');
+            if (!paBefore || pa.availableBal !== add(paBefore, '3000000.00'))
+              throw new Error(`Personal Account not credited (${paBefore} → ${pa.availableBal})`);
+            const skipped = d.approvals.filter(
+              (a) => a.txnId === t.id && [2, 4, 5, 6].includes(a.levelNo)
+            );
+            if (skipped.length) throw new Error('levels outside its route signed');
+            effect = 'Personal Account credited · Treasury Officer → Head of Treasury → Operations';
+            break;
+          }
           if (created !== 1) throw new Error('inflow did not create an investment');
           effect = 'investment created';
           break;
@@ -578,21 +630,12 @@ async function main() {
     fail('Recall', (e as Error).message);
   }
 
-  // 2d. Paper signature: the maker uploads the scan for an approver who cannot sign in the app.
+  // 2d. Paper signature: the maker uploads the scan and the step is done; the named approver can dispute it.
   try {
-    const atHt = db().txns.find(
-      (t) => t.status === 'PENDING_HEAD_TREASURY' && t.makerId === userOf('TO').id
-    )!;
-    await as('TO');
-    await expectBlocked(
-      'A paper signature needs the signed scan',
-      S.transactionsService.recordPaperApproval(atHt.id, {
-        signedBy: userOf('HT').id,
-        reason: 'Travelling',
-        documents: [],
-      })
-    );
-    const t = await S.transactionsService.recordPaperApproval(atHt.id, {
+    const mine = (t: TreasuryTxn) =>
+      t.status === 'PENDING_HEAD_TREASURY' && t.makerId === userOf('TO').id;
+    const [atHt, second] = db().txns.filter(mine);
+    const paperFor = (txnId: string) => ({
       signedBy: userOf('HT').id,
       reason: 'Travelling; signed the printed voucher',
       documents: [
@@ -604,15 +647,68 @@ async function main() {
           dataUrl: null,
         },
       ],
+      txnId,
     });
+    await as('TO');
+    await expectBlocked(
+      'A paper signature needs the signed scan',
+      S.transactionsService.recordPaperApproval(atHt.id, {
+        signedBy: userOf('HT').id,
+        reason: 'Travelling',
+        documents: [],
+      })
+    );
+    const { txnId: _a, ...args } = paperFor(atHt.id);
+    const t = await S.transactionsService.recordPaperApproval(atHt.id, args);
     const ap = db().approvals.find(
       (a) => a.txnId === atHt.id && a.roleCode === 'HT' && a.channel === 'PAPER'
     );
     t.status === 'PENDING_MIS' &&
     ap?.userId === userOf('HT').id &&
     ap.recordedBy === userOf('TO').id
-      ? pass('A paper signature completes the step in the approver’s name', 'moved to MIS')
-      : fail('A paper signature completes the step', t.status);
+      ? pass("The upload completes the step in the approver's name", 'moved to MIS')
+      : fail("The upload completes the step in the approver's name", t.status);
+    db().notifications.some(
+      (n) =>
+        n.targetUserId === userOf('HT').id && n.title.startsWith('Signed on paper in your name')
+    )
+      ? pass('The approver named on it is told', userOf('HT').fullName)
+      : fail('The approver named on it is told', 'no notification');
+    const paper = db().paperSignatures.find((x) => x.txnId === atHt.id && x.status === 'RECORDED')!;
+    await as('TO');
+    await expectBlocked(
+      'Only the named approver can confirm a paper signature',
+      S.transactionsService.confirmPaperSignature(paper.id)
+    );
+    await as('HT');
+    await S.transactionsService.confirmPaperSignature(paper.id);
+    db().paperSignatures.find((x) => x.id === paper.id)?.status === 'CONFIRMED'
+      ? pass('The approver confirms it is theirs', 'confirmed')
+      : fail('The approver confirms it is theirs', 'not confirmed');
+
+    if (!second) throw new Error('No second transaction at Head of Treasury for the dispute check');
+    await as('TO');
+    const { txnId: _b, ...args2 } = paperFor(second.id);
+    await S.transactionsService.recordPaperApproval(second.id, args2);
+    const p2 = db().paperSignatures.find((x) => x.txnId === second.id && x.status === 'RECORDED')!;
+    await as('HT');
+    await S.transactionsService.disputePaperSignature(p2.id, 'I did not sign this voucher');
+    const after = db().txns.find((x) => x.id === second.id)!;
+    const ap2 = db().approvals.find((a) => a.id === p2.approvalId);
+    after.status === 'PENDING_HEAD_TREASURY' &&
+    ap2?.superseded &&
+    db().paperSignatures.find((x) => x.id === p2.id)?.status === 'DISPUTED' &&
+    db().notifications.some(
+      (n) => n.targetRole === 'AUD' && n.title.startsWith('Disputed paper signature')
+    )
+      ? pass(
+          'A disputed paper signature comes back to the approver and alerts Internal Audit',
+          after.txnRef
+        )
+      : fail(
+          'A disputed paper signature comes back to the approver and alerts Internal Audit',
+          after.status
+        );
   } catch (e) {
     fail('Paper signature', (e as Error).message);
   }
@@ -676,6 +772,90 @@ async function main() {
     fail('Switching off a charge needs a reason', (e as Error).message);
   }
 
+  // 2h. One voucher per transaction; partial pre-liquidation adds the net interest to the rebooked principal.
+  try {
+    const one = ['ROLLOVER_B', 'ROLLOVER_C', 'ROLLOVER_D', 'PRELIQ_PARTIAL'].map((s) => {
+      const t = db().txns.find((x) => x.scenarioCode === s && x.status === 'COMPLETED')!;
+      return { s, n: db().vouchers.filter((v) => v.txnId === t.id).length, t };
+    });
+    one.every((x) => x.n === 1)
+      ? pass(
+          'A transaction that pays out and rolls over issues one voucher',
+          one.map((x) => x.s).join(', ')
+        )
+      : fail('One voucher per transaction', one.map((x) => `${x.s}:${x.n}`).join(', '));
+    const pp = one.find((x) => x.s === 'PRELIQ_PARTIAL')!.t;
+    const v = db().vouchers.find((x) => x.txnId === pp.id)!;
+    const row = (label: string) => v.rows.find((r) => r.label === label)?.value ?? '';
+    const want = add(
+      sub(row('Remaining principal'), row('Less charge') || '0'),
+      sub(row('Accrued interest'), v.whtAmt)
+    );
+    v.rollAmt === want && gt(row('Accrued interest'), '0')
+      ? pass(
+          'Partial pre-liquidation: accrued interest (less WHT) is added to the rebooked principal',
+          `rebooked ${v.rollAmt}`
+        )
+      : fail('Partial pre-liquidation capitalises interest', `${v.rollAmt} vs ${want}`);
+  } catch (e) {
+    fail('One voucher per transaction', (e as Error).message);
+  }
+
+  // 2g. Commission on turnover on a Current account debit: rate × amount ÷ 1,000, rate chosen each time.
+  try {
+    await as('TO');
+    const acc = db().accounts.find(
+      (a) => a.productCode === 'CA' && a.status === 'ACTIVE' && gt(a.availableBal, '2000000')
+    )!;
+    const draft = await S.transactionsService.create({
+      scenarioCode: 'THIRD_PARTY_EXT',
+      customerId: acc.customerId,
+      sourceAccountId: acc.id,
+      input: { amount: '1000000.00' },
+    });
+    const at = async (input: Record<string, unknown>) =>
+      S.transactionsService.preview(draft.id, { amount: '1000000.00', ...input });
+    const none = await at({});
+    none.errors.cotRatePerMille
+      ? pass('The COT rate must be chosen on each transaction', none.errors.cotRatePerMille)
+      : fail('The COT rate must be chosen on each transaction', 'no error raised');
+    const two = await at({ cotRatePerMille: '2' });
+    const five = await at({ cotRatePerMille: '5' });
+    const fo2 = two.vouchers[0];
+    const fo5 = five.vouchers[0];
+    fo2.cotAmt === '2000.00' && fo5.cotAmt === '5000.00' && fo5.netAmt === '994000.00'
+      ? pass(
+          'COT on a Current account debit: ₦2 and ₦5 per mille',
+          `₦1,000,000 → ${fo2.cotAmt} / ${fo5.cotAmt}`
+        )
+      : fail('COT on a Current account debit', `${fo2.cotAmt} / ${fo5.cotAmt} / net ${fo5.netAmt}`);
+    const off = await at({ cotOn: false });
+    off.errors.cotOffReason
+      ? pass('Switching COT off needs a reason', off.errors.cotOffReason)
+      : fail('Switching COT off needs a reason', 'no error raised');
+    const bad = await at({ cotRatePerMille: '0' });
+    bad.errors.cotRatePerMille
+      ? pass('A COT rate must be more than 0', bad.errors.cotRatePerMille)
+      : fail('A COT rate must be more than 0', 'no error raised');
+    await S.transactionsService.cancel(draft.id, 'flow check');
+    const pa = db().accounts.find(
+      (a) => a.productCode === 'PA' && a.status === 'ACTIVE' && gt(a.availableBal, '2000000')
+    )!;
+    const fromPa = await S.transactionsService.create({
+      scenarioCode: 'THIRD_PARTY_EXT',
+      customerId: pa.customerId,
+      sourceAccountId: pa.id,
+      input: { amount: '1000000.00' },
+    });
+    const noCot = await S.transactionsService.preview(fromPa.id, { amount: '1000000.00' });
+    noCot.cot === null && noCot.vouchers[0].cotAmt === '0.00'
+      ? pass('No COT on a Personal Account debit', 'not charged')
+      : fail('No COT on a Personal Account debit', noCot.vouchers[0].cotAmt);
+    await S.transactionsService.cancel(fromPa.id, 'flow check');
+  } catch (e) {
+    fail('Commission on turnover', (e as Error).message);
+  }
+
   // 2c. Data import: Treasury uploads, Head of Treasury approves, records land.
   try {
     const to = await as('TO');
@@ -722,6 +902,37 @@ async function main() {
     fail('Data import', (e as Error).message);
   }
 
+  // 2f. Audit-trail review: Internal Audit verifies or flags entries; never their own.
+  try {
+    const aud = await as('AUD');
+    const others = db()
+      .audit.filter((e) => e.userId !== aud.id)
+      .slice(-3)
+      .map((e) => e.id);
+    const own = db().audit.find((e) => e.userId === aud.id)!;
+    await expectBlocked(
+      'Flagging an audit entry needs a reason',
+      S.auditService.review([others[0]], 'FLAGGED', ' ')
+    );
+    const r = await S.auditService.review([...others, own.id], 'VERIFIED', '');
+    r.done.length === 3 && r.skipped.length === 1 && r.skipped[0].reason === 'your own action'
+      ? pass('Audit marks selected entries verified, never their own', `${r.done.length} verified`)
+      : fail('Audit marks selected entries verified, never their own', JSON.stringify(r));
+    await S.auditService.review([others[0]], 'FLAGGED', 'Needs the call recording');
+    const flagged = await S.auditService.list({ filters: { review: 'FLAGGED' } });
+    const row = flagged.items.find((x) => x.id === others[0]);
+    row?.review?.status === 'FLAGGED' && row.review.reviewedByName === aud.fullName
+      ? pass('Each entry shows its review status and who set it', `#${row.seqNo} flagged`)
+      : fail('Each entry shows its review status and who set it', String(row?.review?.status));
+    await as('MIS');
+    await expectBlocked(
+      'Only Internal Audit reviews audit entries',
+      S.auditService.review([others[1]], 'VERIFIED', '')
+    );
+  } catch (e) {
+    fail('Audit review', (e as Error).message);
+  }
+
   // 3. Integrity.
   const chain = verifyAuditChain(db().audit);
   chain.ok ? pass('Audit hash chain', chain.message) : fail('Audit hash chain', chain.message);
@@ -729,7 +940,7 @@ async function main() {
   for (const r of results)
     console.log(`${r.ok ? 'PASS' : 'FAIL'}  ${r.name}${r.note ? ` — ${r.note}` : ''}`);
   console.log(
-    `\n${completed}/15 scenarios completed end to end · ${results.filter((r) => r.ok).length}/${results.length} checks PASS`
+    `\n${completed}/${SCENARIO_CODES.length} scenarios completed end to end · ${results.filter((r) => r.ok).length}/${results.length} checks PASS`
   );
   if (results.some((r) => !r.ok)) process.exit(1);
 }

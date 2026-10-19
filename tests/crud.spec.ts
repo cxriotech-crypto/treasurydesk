@@ -167,8 +167,34 @@ test.describe('CRUD', () => {
   test('the audit trail verifies its own hash chain', async ({ page }) => {
     await login(page, 'AUD');
     await page.goto('/audit');
+    await expect(page.getByText('Two different checks')).toBeVisible();
     await page.getByRole('button', { name: 'Verify integrity' }).click();
     await expect(page.getByText('The hash chain is intact')).toBeVisible({ timeout: 20_000 });
+  });
+
+  test('Internal Audit marks entries verified or flagged, one by one or in bulk', async ({
+    page,
+  }) => {
+    await fastDemo(page);
+    await login(page, 'AUD');
+    await page.goto('/audit');
+    await page.getByLabel('Review status').selectOption('NOT_REVIEWED');
+    const boxes = page.locator('main tbody input[type="checkbox"]:not([disabled])');
+    await expect(boxes.first()).toBeVisible({ timeout: 20_000 });
+    await boxes.nth(0).check();
+    await boxes.nth(1).check();
+    await page.getByRole('button', { name: 'Mark verified (2)' }).click();
+    await page.getByRole('dialog').getByRole('button', { name: 'Mark verified' }).click();
+    await expect(page.getByText('2 entries marked verified')).toBeVisible({ timeout: 20_000 });
+
+    await boxes.nth(0).check();
+    await page.getByRole('button', { name: 'Flag', exact: true }).click();
+    const dlg = page.getByRole('dialog');
+    await dlg.getByLabel('What needs explaining').fill('Ask Treasury for the customer letter');
+    await dlg.getByRole('button', { name: 'Flag' }).click();
+    await expect(page.getByText('1 entry flagged')).toBeVisible({ timeout: 20_000 });
+    await page.getByLabel('Review status').selectOption('FLAGGED');
+    await expect(page.locator('main table').getByText('Flagged').first()).toBeVisible();
   });
 
   test('notifications can be read and cleared', async ({ page }) => {

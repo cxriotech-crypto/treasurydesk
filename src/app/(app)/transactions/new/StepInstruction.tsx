@@ -3,7 +3,7 @@
 import { useMemo, useState } from 'react';
 import { ArrowLeft, ArrowRight, Search } from 'lucide-react';
 import type { AccountType, InstructionChannel, PayDestination } from '@/domain/codes';
-import { CHANNEL_LABELS, SCENARIO_META } from '@/domain/codes';
+import { ACCOUNT_PRODUCT_LABELS, CHANNEL_LABELS, SCENARIO_META } from '@/domain/codes';
 import { INTERNAL_BANK_CODE } from '@/domain/rules';
 import { isoDatePart, isoTimePart, nowIso } from '@/lib/dates';
 import { isPositive } from '@/lib/money';
@@ -34,6 +34,7 @@ import type { StepProps } from './Wizard';
 /** Scenarios whose instructed amount is also the voucher amount. */
 const AMOUNT_DRIVES_INPUT = new Set([
   'INFLOW',
+  'INFLOW_ACCOUNT',
   'THIRD_PARTY_EXT',
   'THIRD_PARTY_INT',
   'TRANSFER_SS_PA',
@@ -45,7 +46,7 @@ const AMOUNT_DRIVES_INPUT = new Set([
 export function StepInstruction({ detail, goTo }: StepProps) {
   const { txn, instruction, customer } = detail;
   const s = txn.scenarioCode;
-  const hasPayout = SCENARIO_META[s].vouchers.includes('FO');
+  const hasPayout = SCENARIO_META[s].payout;
   const forcedExternal = s === 'THIRD_PARTY_EXT';
   const internalTp = s === 'THIRD_PARTY_INT';
   const now = nowIso();
@@ -122,7 +123,7 @@ export function StepInstruction({ detail, goTo }: StepProps) {
             accountNo: 'Account not found',
           });
         setBenefName(r.accountName);
-        setEnquiry(`${r.accountName} · ${r.productCode === 'PA' ? 'Personal Account' : 'Savings'}`);
+        setEnquiry(`${r.accountName} · ${ACCOUNT_PRODUCT_LABELS[r.productCode]}`);
       } else {
         const r = await beneficiariesService.nameEnquiry(bankCode, accountNo);
         setBenefName(r.accountName);

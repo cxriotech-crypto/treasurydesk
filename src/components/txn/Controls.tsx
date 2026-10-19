@@ -1,6 +1,6 @@
 'use client';
 
-import { Check, Circle, X } from 'lucide-react';
+import { Check, Circle, Minus, X } from 'lucide-react';
 import { CONTROL_CODES, CONTROL_LABELS, type ControlCode, type ControlState } from '@/domain/codes';
 import { formatDateTime } from '@/lib/format';
 import { Icon, cn } from '@/components/ui';
@@ -13,7 +13,7 @@ export interface ControlLine {
   note?: string | null;
 }
 
-/** The 12 SOP controls with who / when. Ticked automatically as each step completes. */
+/** The 12 SOP controls with who / when. Ticked automatically as each step completes; levels a route skips are marked not required. */
 export function ControlsChecklist({
   controls,
   compact,
@@ -33,17 +33,30 @@ export function ControlsChecklist({
                 'mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border',
                 c.state === 'PASSED' && 'border-teal-bright bg-teal-bright text-white dark:text-bg',
                 c.state === 'FAILED' && 'border-st-danger-fg bg-st-danger-bg text-st-danger-fg',
-                c.state === 'PENDING' && 'border-border-strong text-subtle'
+                c.state === 'PENDING' && 'border-border-strong text-subtle',
+                c.state === 'NOT_REQUIRED' && 'border-dashed border-border-strong text-subtle'
               )}
-              aria-label={c.state.toLowerCase()}
+              aria-label={c.state === 'NOT_REQUIRED' ? 'not required' : c.state.toLowerCase()}
             >
               <Icon
-                icon={c.state === 'PASSED' ? Check : c.state === 'FAILED' ? X : Circle}
+                icon={
+                  c.state === 'PASSED'
+                    ? Check
+                    : c.state === 'FAILED'
+                      ? X
+                      : c.state === 'NOT_REQUIRED'
+                        ? Minus
+                        : Circle
+                }
                 size={c.state === 'PENDING' ? 6 : 12}
               />
             </span>
             <span className="min-w-0 text-[13px] leading-5">
-              <span className={cn(c.state === 'PENDING' && 'text-muted')}>
+              <span
+                className={cn(
+                  (c.state === 'PENDING' || c.state === 'NOT_REQUIRED') && 'text-muted'
+                )}
+              >
                 <span className="num text-subtle">{code}</span> {CONTROL_LABELS[code]}
               </span>
               {!compact && (c.actorName || c.note) ? (
@@ -65,5 +78,6 @@ export function ControlsChecklist({
 }
 
 export function controlsProgress(controls: ControlLine[]): string {
-  return `${controls.filter((c) => c.state === 'PASSED').length}/12`;
+  const required = controls.filter((c) => c.state !== 'NOT_REQUIRED').length || 12;
+  return `${controls.filter((c) => c.state === 'PASSED').length}/${required}`;
 }
