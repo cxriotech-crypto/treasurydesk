@@ -651,7 +651,9 @@ async function main() {
   // 2d. Paper signature: the maker uploads the scan and the step is done; the named approver can dispute it.
   try {
     const mine = (t: TreasuryTxn) =>
-      t.status === 'PENDING_HEAD_TREASURY' && t.makerId === userOf('TO').id;
+      t.status === 'PENDING_HEAD_TREASURY' &&
+      t.makerId === userOf('TO').id &&
+      chainLevels(t.scenarioCode).includes(4);
     const [atHt, second] = db().txns.filter(mine);
     const paperFor = (txnId: string) => ({
       signedBy: userOf('HT').id,
@@ -855,6 +857,16 @@ async function main() {
     bad.errors.cotRatePerMille
       ? pass('A COT rate must be more than 0', bad.errors.cotRatePerMille)
       : fail('A COT rate must be more than 0', 'no error raised');
+    const off = await at({ cotOn: false });
+    off.errors.cotOffReason && !off.errors.cotRatePerMille
+      ? pass('Switching COT off needs a reason (and no rate)', off.errors.cotOffReason)
+      : fail('Switching COT off needs a reason', JSON.stringify(off.errors));
+    const waived = await at({ cotOn: false, cotOffReason: 'Waived by the MD' });
+    !Object.keys(waived.errors).length &&
+    waived.vouchers[0].cotAmt === '0.00' &&
+    waived.vouchers[0].rows.some((r) => r.note === 'Switched off: Waived by the MD')
+      ? pass('With a reason, COT is switched off and the reason is on the voucher', '₦0.00')
+      : fail('COT switched off with a reason', JSON.stringify(waived.errors));
     await S.transactionsService.cancel(draft.id, 'flow check');
     // No other transaction carries COT any more.
     const tp = await S.transactionsService.create({

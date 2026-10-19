@@ -356,6 +356,14 @@ test.describe('Transaction flows', () => {
     await expect(page.getByRole('heading', { name: /3\. Voucher/ })).toBeVisible();
     await page.getByRole('textbox', { name: /^Turnover/ }).fill('1,000,000');
     await expect(page.getByText('Choose the COT rate').first()).toBeVisible();
+    // Like WHT and the pre-liquidation charge, COT can be switched off with a reason, then back on.
+    const cotSwitch = page.getByRole('switch', { name: 'Charge commission on turnover' });
+    await cotSwitch.click();
+    const why = page.getByRole('dialog');
+    await why.getByLabel('Reason').fill('Waived by the MD');
+    await why.getByRole('button', { name: 'Switch COT off' }).click();
+    await expect(page.getByText('Not charged: Waived by the MD')).toBeVisible();
+    await cotSwitch.click();
     await page.getByRole('radio', { name: '₦5 per mille' }).click();
     await expect(page.getByText('₦5,000.00').first()).toBeVisible({ timeout: 20_000 });
     await page.getByRole('button', { name: 'Sign & submit' }).click();

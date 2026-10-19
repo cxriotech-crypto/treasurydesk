@@ -121,6 +121,10 @@ function describe(db: Db, t: TreasuryTxn, v: Voucher): string[] {
       if (pay && isPositive(v.netAmt)) out.push(...payoutLines());
       break;
     case 'CT':
+      if (!isPositive(v.cotAmt)) {
+        out.push(`${v.voucherNo}: COT switched off for this transaction — nothing to post.`);
+        break;
+      }
       out.push(
         src
           ? `${v.voucherNo}: debit Current account ${src.accountNo} with ${formatNaira(v.cotAmt)} commission on turnover and book it to income.`

@@ -2026,7 +2026,7 @@ function applyEffects(db: Db, ctx: Ctx, t: TreasuryTxn) {
       // The commission is debited from the Current account; a Call account's is posted in Eazybankz.
       const ct = vs.find((v) => v.voucherType === 'CT')!;
       const acc = getById(db, 'accounts', t.sourceAccountId, 'Current account');
-      debit(db, acc, ct.cotAmt, 'commission on turnover');
+      if (isPositive(ct.cotAmt)) debit(db, acc, ct.cotAmt, 'commission on turnover');
       break;
     }
     case 'COT_CALL':

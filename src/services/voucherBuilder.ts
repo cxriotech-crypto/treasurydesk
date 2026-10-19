@@ -403,12 +403,21 @@ export function computeTxn(c: TxnCalcContext, baseEnv: CalcEnv): TxnComputation 
       const amtErr = validateAmount(i.amount, 'Turnover');
       if (amtErr) errors.amount = amtErr;
       const turnover = amtErr ? ZERO : toMoney(i.amount!);
-      const rate = i.cotRatePerMille?.trim() || '';
-      if (!rate) errors.cotRatePerMille = 'Choose the COT rate';
+      // Like WHT and the pre-liquidation charge, COT can be switched off for this transaction, with a reason.
+      const on = i.cotOn !== false;
+      const rate = on ? i.cotRatePerMille?.trim() || '' : '';
+      if (on && !rate) errors.cotRatePerMille = 'Choose the COT rate';
+      if (!on && !i.cotOffReason?.trim())
+        errors.cotOffReason = 'Give a reason for not charging commission on turnover';
       const r = rate ? calcCot(turnover, rate) : null;
       if (r) Object.assign(errors, r.errors);
       const cot =
-        r && !r.errors.cotRatePerMille ? r.cot : { value: ZERO, formula: 'Choose the rate' };
+        r && !r.errors.cotRatePerMille
+          ? r.cot
+          : {
+              value: ZERO,
+              formula: on ? 'Choose the rate' : 'COT switched off for this transaction',
+            };
       if (acc && !errors.amount && gt(cot.value, acc.availableBal))
         errors.amount = `COT ${formatNaira(cot.value)} exceeds the available balance ${formatNaira(acc.availableBal)}`;
       const where = acc
@@ -421,7 +430,8 @@ export function computeTxn(c: TxnCalcContext, baseEnv: CalcEnv): TxnComputation 
         netAmt: cot.value,
         effectiveDate: date,
         remarks: withPurpose(
-          i.remarks ?? `Commission on turnover${rate ? ` at ₦${rate} per mille` : ''} on ${where}`
+          i.remarks ??
+            `Commission on turnover${on ? (rate ? ` at ₦${rate} per mille` : '') : ' (not charged)'} on ${where}`
         ),
         rows: [
           info(acc ? 'Current (CMS) account' : 'Call account', where),
@@ -431,7 +441,14 @@ export function computeTxn(c: TxnCalcContext, baseEnv: CalcEnv): TxnComputation 
             { value: turnover, formula: 'Turnover the commission is charged on' },
             'input'
           ),
-          info('COT rate', rate ? `₦${rate} per mille` : '—'),
+          on
+            ? info('COT rate', rate ? `₦${rate} per mille` : '—')
+            : info(
+                'COT rate (switched off)',
+                '—',
+                'text',
+                i.cotOffReason?.trim() ? `Switched off: ${i.cotOffReason.trim()}` : undefined
+              ),
           total('COT to debit', cot),
           input('Value date', date, 'date'),
         ],
@@ -943,7 +960,8 @@ export function computeTxn(c: TxnCalcContext, baseEnv: CalcEnv): TxnComputation 
   let chargeOff = false;
   for (const v of vouchers) {
     for (const row of v.rows) {
-      if (!row.label.includes('(switched off)')) continue;
+      // (COT carries its own reason, handled with the COT transaction.)
+      if (!row.label.includes('(switched off)') || row.label.startsWith('COT')) continue;
       const charge = row.label.startsWith('Pre-liquidation charge');
       const reason = (charge ? i.preliqChargeOffReason : i.whtOffReason)?.trim();
       if (charge) chargeOff = true;

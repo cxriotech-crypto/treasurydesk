@@ -91,6 +91,8 @@ The user menu switches between the demo users in one click.
   There is no customer instruction or signature check, so the wizard has three steps: account, Eazybankz,
   voucher. The Treasury Officer enters the turnover and chooses the rate — ₦2 per mille, ₦5 per mille or any
   other — and the COT Voucher shows COT = rate × turnover ÷ 1,000 (₦1,000,000 at ₦2 is ₦2,000, at ₦5 is ₦5,000).
+  Like WHT and the pre-liquidation charge, COT can be switched off for the transaction; switching it off needs a
+  reason, which prints on the voucher and is kept in the audit trail, and the COT is then ₦0.
   It goes Treasury Officer → Head of Treasury → Operations (two officers). On execution the COT is debited from
   the Current account; for a Call account Operations post it in Eazybankz. COT shows in the charges report.
 - **Several documents everywhere.** The instruction can have several documents, a paper signature several
