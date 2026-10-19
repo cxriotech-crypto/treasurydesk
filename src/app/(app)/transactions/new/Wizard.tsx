@@ -49,7 +49,10 @@ const STEP_LABELS = [
 /** Furthest step the maker may open, from the controls already passed. */
 function reachable(d: TxnDetail | null | undefined): number {
   if (!d) return 1;
-  const ok = (code: string) => d.controls.find((c) => c.controlCode === code)?.state === 'PASSED';
+  const ok = (code: string) =>
+    ['PASSED', 'NOT_REQUIRED'].includes(
+      d.controls.find((c) => c.controlCode === code)?.state ?? ''
+    );
   if (d.txn.status === 'RETURNED') return 5;
   if (ok('C04')) return 5;
   if (ok('C02')) return 4;
@@ -85,8 +88,22 @@ export function Wizard() {
     }
   }, [d, router]);
 
+  // A bank charge (COT) has no customer instruction: its wizard skips the instruction and signature steps.
+  const steps =
+    d && SCENARIO_META[d.txn.scenarioCode].instruction === false ? [1, 4, 5] : [1, 2, 3, 4, 5];
+  const onRoute = (n: number, from: number) =>
+    steps.includes(n)
+      ? n
+      : n > from
+        ? (steps.find((x) => x > n) ?? 5)
+        : ([...steps].reverse().find((x) => x < n) ?? 1);
+  const charge = steps.length === 3;
+  useEffect(() => {
+    if (charge && (step === 2 || step === 3)) setStep(4);
+  }, [charge, step]);
+
   const goTo = (n: number) => {
-    setStep(n);
+    setStep(onRoute(n, step ?? 1));
     if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -96,10 +113,13 @@ export function Wizard() {
   const current = step ?? 1;
   const stopped = d?.txn.status === 'STOPPED';
   const notMaker = d && d.actions.continueDraft && !stopped;
-  const stepItems: StepItem[] = STEP_LABELS.map((label, i) => {
-    const n = i + 1;
+  const stepItems: StepItem[] = steps.map((n) => {
     const done = n < max;
-    return { key: String(n), label, state: n === current ? 'current' : done ? 'done' : 'todo' };
+    return {
+      key: String(n),
+      label: STEP_LABELS[n - 1],
+      state: n === current ? 'current' : done ? 'done' : 'todo',
+    };
   });
 
   const controlsList = d?.controls ?? [];
@@ -169,7 +189,8 @@ export function Wizard() {
 
         <Card className="min-w-0 p-4 md:p-5">
           <h2 className="mb-4 text-[15px] font-semibold">
-            <span className="num text-muted">{current}.</span> {STEP_LABELS[current - 1]}
+            <span className="num text-muted">{steps.indexOf(current) + 1 || current}.</span>{' '}
+            {STEP_LABELS[current - 1]}
           </h2>
           {current === 1 || !d ? (
             <StepSubject

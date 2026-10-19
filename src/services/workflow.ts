@@ -167,7 +167,9 @@ function setControl(
 }
 
 function requireControls(db: Db, txnId: string, codes: ControlCode[]) {
-  const missing = codes.filter((code) => controlOf(db, txnId, code).state !== 'PASSED');
+  const missing = codes.filter(
+    (code) => !['PASSED', 'NOT_REQUIRED'].includes(controlOf(db, txnId, code).state)
+  );
   if (missing.length) {
     throw new AppError(`Complete these steps first: ${missing.join(', ')}.`, 'STATE');
   }
@@ -373,6 +375,9 @@ export function createDraft(ctx: Ctx, a: CreateDraftArgs): TreasuryTxn {
     const subject = validateSubject(db, ctx, a);
     const year = yearOf(today(ctx));
     const txnRef = `TRX-${year}-${String(nextCounter(db, `txnRef:${year}`)).padStart(6, '0')}`;
+    // A bank charge (COT) has no customer instruction: it starts at verification and its SLA starts now.
+    const noInstruction = SCENARIO_META[a.scenarioCode].instruction === false;
+    const env0 = envOf(db);
     const t = insert(db, 'txns', {
       txnRef,
       txnType: SCENARIO_META[a.scenarioCode].txnType,
@@ -383,12 +388,12 @@ export function createDraft(ctx: Ctx, a: CreateDraftArgs): TreasuryTxn {
       reversedByTxnId: null,
       resultInvestmentId: null,
       batchId: null,
-      status: 'DRAFT',
-      wizardStep: 1,
+      status: noInstruction ? 'VERIFICATION' : 'DRAFT',
+      wizardStep: noInstruction ? 4 : 1,
       makerId: u.id,
-      receivedAt: null,
+      receivedAt: noInstruction ? ctx.at : null,
       submittedAt: null,
-      slaDueAt: null,
+      slaDueAt: noInstruction ? computeSlaDue(ctx.at, env0.settings, env0.holidays) : null,
       completedAt: null,
       cycleNo: 1,
       input: a.input ?? {},
@@ -427,7 +432,11 @@ export function createDraft(ctx: Ctx, a: CreateDraftArgs): TreasuryTxn {
         state: na ? 'NOT_REQUIRED' : 'PENDING',
         actedBy: null,
         actedAt: null,
-        note: na ? 'Not required on this route' : null,
+        note: na
+          ? ['C01', 'C02'].includes(code)
+            ? 'Not required: a bank charge, no customer instruction'
+            : 'Not required on this route'
+          : null,
       });
     }
     writeAudit(db, ctx, {
@@ -924,12 +933,18 @@ function liveApprovals(db: Db, t: TreasuryTxn): Approval[] {
 /** Approval controls, cleared when a transaction starts the chain again. */
 const CHAIN_CONTROLS: ControlCode[] = ['C03', 'C06', 'C07', 'C08', 'C09', 'C10'];
 
-/** The approval controls of levels this scenario's route leaves out. */
+/**
+ * The controls this scenario leaves out: approval levels not on its route, and — for a bank charge with no customer
+ * instruction (COT) — the instruction and signature checks.
+ */
 export function skippedControls(s: ScenarioCode): ControlCode[] {
   const levels = chainLevels(s);
-  return APPROVAL_LEVELS.filter((l) => !levels.includes(l.levelNo)).map(
+  const skipped = APPROVAL_LEVELS.filter((l) => !levels.includes(l.levelNo)).map(
     (l) => l.control as ControlCode
   );
+  return SCENARIO_META[s].instruction === false
+    ? (['C01', 'C02'] as ControlCode[]).concat(skipped)
+    : skipped;
 }
 
 /** The status waiting after `levelNo` has signed: the next level on this scenario's route, or Operations. */
@@ -942,7 +957,7 @@ function statusAfterLevel(s: ScenarioCode, levelNo: number): TxnStatus {
 export function submitBlocker(db: Db, t: TreasuryTxn, asOf: string): string | null {
   if (!['VERIFICATION', 'RETURNED'].includes(t.status)) return 'Not ready to submit';
   const missing = (['C01', 'C02', 'C04'] as ControlCode[]).filter(
-    (c) => controlOf(db, t.id, c).state !== 'PASSED'
+    (c) => !['PASSED', 'NOT_REQUIRED'].includes(controlOf(db, t.id, c).state)
   );
   if (missing.length)
     return `Complete ${missing.map((c) => CONTROL_LABELS[c].toLowerCase()).join(', ')} first`;
@@ -2007,6 +2022,15 @@ function applyEffects(db: Db, ctx: Ctx, t: TreasuryTxn) {
       if (acc) credit(db, acc, fi!.principalAmt);
       break;
     }
+    case 'COT_CMS': {
+      // The commission is debited from the Current account; a Call account's is posted in Eazybankz.
+      const ct = vs.find((v) => v.voucherType === 'CT')!;
+      const acc = getById(db, 'accounts', t.sourceAccountId, 'Current account');
+      debit(db, acc, ct.cotAmt, 'commission on turnover');
+      break;
+    }
+    case 'COT_CALL':
+      break;
     case 'MATURITY':
       settlePayout(db, fo);
       closeInvestment(db, ctx, t, inv!, 'CLOSED', {

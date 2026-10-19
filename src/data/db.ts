@@ -30,7 +30,7 @@ import type {
   Voucher,
 } from '@/domain/types';
 
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 export interface Db {
   schemaVersion: number;

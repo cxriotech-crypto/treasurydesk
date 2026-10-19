@@ -120,6 +120,13 @@ function describe(db: Db, t: TreasuryTxn, v: Voucher): string[] {
       // Rollover B, C and D: the same voucher also pays out.
       if (pay && isPositive(v.netAmt)) out.push(...payoutLines());
       break;
+    case 'CT':
+      out.push(
+        src
+          ? `${v.voucherNo}: debit Current account ${src.accountNo} with ${formatNaira(v.cotAmt)} commission on turnover and book it to income.`
+          : `${v.voucherNo}: post ${formatNaira(v.cotAmt)} commission on turnover against Call placement ${inv?.investmentRef} and book it to income.`
+      );
+      break;
     case 'TS':
       if (t.scenarioCode === 'TRANSFER_SS_PA')
         out.push(

@@ -155,9 +155,7 @@ export interface TxnInput {
   creditTo?: CreditTarget; // Inflow B: where the funds are credited
   creditAccountNo?: string; // Inflow B: the account credited (Call, overdraft, other)
   creditOther?: string; // Inflow B: what "Other" is
-  cotOn?: boolean; // charge commission on turnover where it applies (default on)
-  cotRatePerMille?: string; // ₦ per ₦1,000, chosen on each transaction
-  cotOffReason?: string;
+  cotRatePerMille?: string; // COT transaction: ₦ per ₦1,000 of turnover, chosen on each transaction
   // reversal corrected values
   correctedRate?: Rate;
   correctedTenorDays?: number;

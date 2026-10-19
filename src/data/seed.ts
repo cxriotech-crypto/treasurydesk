@@ -772,6 +772,8 @@ function populate(db: Db, T: string, anchor: string, fresh: boolean) {
   // History subjects: an investment shaped for the scenario on day D.
   const histSubject = (scenario: ScenarioCode, D: string): Investment => {
     const c = cust();
+    if (scenario === 'COT_CALL')
+      return mkInv({ customer: c, eff: addDays(D, -rng.int(10, 25)), tenor: 90, product: 'CALL' });
     if (scenario === 'PRELIQ_FULL' || scenario === 'PRELIQ_PARTIAL') {
       return mkInv({
         customer: c,
@@ -794,19 +796,7 @@ function populate(db: Db, T: string, anchor: string, fresh: boolean) {
     return mkInv({ customer: c, ...effFor(D) });
   };
 
-  /** The officer's inputs, plus the COT rate they choose where commission on turnover applies. */
   const baseInput = (
-    scenario: ScenarioCode,
-    s: ReturnType<Plan['subject']>,
-    day: string
-  ): TxnInput => {
-    const input = scenarioInput(scenario, s, day);
-    const cotApplies =
-      SCENARIO_META[scenario].payout &&
-      (s.account?.productCode === 'CA' || s.investment?.productCode === 'CALL');
-    return cotApplies ? { ...input, cotRatePerMille: rng.pick(['2', '5']) } : input;
-  };
-  const scenarioInput = (
     scenario: ScenarioCode,
     s: ReturnType<Plan['subject']>,
     day: string
@@ -849,6 +839,12 @@ function populate(db: Db, T: string, anchor: string, fresh: boolean) {
           amount: fraction(pa(s.customer).availableBal, 0.3),
           newRate: rate(rng, 14, 20),
           newTenorDays: scenario === 'TRANSFER_PA_CALL' ? 30 : rng.pick([90, 180]),
+        };
+      case 'COT':
+        return {
+          valueDate: valueDay,
+          amount: amountBetween(rng, 5_000_000, 120_000_000, 100_000),
+          cotRatePerMille: rng.pick(['2', '5', '2', '3.5']),
         };
       case 'INFLOW':
         if (scenario === 'INFLOW_ACCOUNT') {
@@ -905,6 +901,11 @@ function populate(db: Db, T: string, anchor: string, fresh: boolean) {
           [...buckets.matured, ...buckets.today, ...buckets.next7],
           (i) => i.maturityDate <= addDays(T, 6)
         );
+      } else if (meta.txnType === 'COT') {
+        inv = take(
+          [...buckets.long, ...buckets.next30, ...buckets.next7],
+          (i) => i.productCode === 'CALL' && i.maturityDate > addDays(T, 5)
+        );
       } else if (meta.txnType === 'ANNIVERSARY') {
         inv = take(buckets.anniv, (i) => (i.nextAnnivDate ?? '') <= addDays(T, 12));
       } else {
@@ -914,6 +915,15 @@ function populate(db: Db, T: string, anchor: string, fresh: boolean) {
         );
       }
       return () => ({ customer: findById(db, 'customers', inv.customerId)!, investment: inv });
+    }
+    if (scenario === 'COT_CMS') {
+      const c = rng.shuffle(customers).find((x) => {
+        const a = ca(x);
+        return !!a && !used.has(a.id) && Number(a.availableBal) >= 3_000_000;
+      });
+      if (!c) throw new Error('Seed: no customer with a Current account for COT');
+      used.add(ca(c)!.id);
+      return () => ({ customer: c, account: ca(c)! });
     }
     if (meta.subject === 'ACCOUNT') {
       const c =
@@ -966,6 +976,8 @@ function populate(db: Db, T: string, anchor: string, fresh: boolean) {
     ['TRANSFER_SS_PA', 6, {}],
     ['TRANSFER_PA_CP', 3, {}],
     ['INFLOW_ACCOUNT', 2, {}],
+    ['COT_CMS', 8, {}],
+    ['COT_CALL', 5, {}],
   ];
   for (const [scenario, back, extra] of hist) {
     const start = histStart(back);
@@ -1065,6 +1077,10 @@ function populate(db: Db, T: string, anchor: string, fresh: boolean) {
   recent('INFLOW_ACCOUNT', 'PENDING_HEAD_TREASURY');
   recent('INFLOW_ACCOUNT', 'PENDING_OPERATIONS');
   recent('INFLOW_ACCOUNT', 'VERIFICATION');
+  // Commission on turnover, its own transaction: Treasury Officer → Head of Treasury → Operations.
+  recent('COT_CMS', 'PENDING_HEAD_TREASURY');
+  recent('COT_CALL', 'PENDING_HEAD_TREASURY');
+  recent('COT_CMS', 'PENDING_OPERATIONS');
   // A second batch: two items, both still with their Account Officers.
   recent('TRANSFER_SS_PA', 'PENDING_ACCOUNT_OFFICER', { batchKey: 'B2' });
   recent('THIRD_PARTY_EXT', 'PENDING_ACCOUNT_OFFICER', { batchKey: 'B2' });
@@ -1159,67 +1175,70 @@ function populate(db: Db, T: string, anchor: string, fresh: boolean) {
       continue;
     }
 
+    // A bank charge (COT) has no customer instruction or signature check.
+    const charge = SCENARIO_META[p.scenario].instruction === false;
     // 1. instruction (received a few minutes before the draft was opened)
     const insAt = at();
-    push(insAt, () => {
-      const txn = findById(db, 'txns', id())!;
-      const received = addMinutes(createAt, -rng.int(5, 20));
-      const hasFo = SCENARIO_META[p.scenario].payout;
-      const external =
-        p.scenario === 'THIRD_PARTY_EXT' ||
-        (hasFo && p.scenario !== 'THIRD_PARTY_INT' && !!p.external);
-      const benef = db.beneficiaries.find(
-        (b) => b.customerId === subj.customer.id && !b.isInternal
-      );
-      const bank = rng.pick(activeBanks);
-      let comp = ZERO;
-      try {
-        comp = wf.computeFor(db, txn, isoDatePart(insAt)).headlineAmt;
-      } catch {
-        comp = txn.headlineAmt;
-      }
-      const internalTarget =
-        p.scenario === 'THIRD_PARTY_INT'
-          ? pa(customers.find((c) => c.id !== subj.customer.id && !used.has(`tp:${c.id}`))!)
-          : null;
-      if (internalTarget) used.add(`tp:${internalTarget.customerId}`);
-      wf.recordInstruction(ctxOf(TO, insAt), id(), {
-        channel: rng.pick(['LETTER', 'EMAIL', 'FORM', 'MANDATE'] as const),
-        receivedDate: isoDatePart(received),
-        receivedTime: isoTimePart(received),
-        amount: Number(comp) > 0 ? comp : toMoney('1000000'),
-        purpose: rng.pick([
-          'Customer instruction as per letter',
-          'Business operating expenses',
-          'School fees',
-          'Payment to supplier',
-          'Investment instruction',
-          'Personal use',
-          'Property payment',
-        ]),
-        documents: [
-          {
-            fileName: `instruction-${txn.txnRef}.pdf`,
-            mimeType: 'application/pdf',
-            sizeBytes: 184_320,
-            dataUrl: null,
-          },
-        ],
-        payDestination: external ? 'EXTERNAL' : 'INTERNAL',
-        benefName: external
-          ? (benef?.benefName ?? subj.customer.customerName)
-          : (internalTarget?.accountName ?? null),
-        bankCode: external ? (benef?.bankCode ?? bank.bankCode) : null,
-        accountNo: external
-          ? (benef?.accountNo ?? String(rng.int(1_000_000_000, 9_999_999_999)))
-          : (internalTarget?.accountNo ?? null),
-        accountType: external
-          ? (benef?.accountType ?? 'CURRENT')
-          : internalTarget
-            ? 'SAVINGS'
-            : null,
+    if (!charge)
+      push(insAt, () => {
+        const txn = findById(db, 'txns', id())!;
+        const received = addMinutes(createAt, -rng.int(5, 20));
+        const hasFo = SCENARIO_META[p.scenario].payout;
+        const external =
+          p.scenario === 'THIRD_PARTY_EXT' ||
+          (hasFo && p.scenario !== 'THIRD_PARTY_INT' && !!p.external);
+        const benef = db.beneficiaries.find(
+          (b) => b.customerId === subj.customer.id && !b.isInternal
+        );
+        const bank = rng.pick(activeBanks);
+        let comp = ZERO;
+        try {
+          comp = wf.computeFor(db, txn, isoDatePart(insAt)).headlineAmt;
+        } catch {
+          comp = txn.headlineAmt;
+        }
+        const internalTarget =
+          p.scenario === 'THIRD_PARTY_INT'
+            ? pa(customers.find((c) => c.id !== subj.customer.id && !used.has(`tp:${c.id}`))!)
+            : null;
+        if (internalTarget) used.add(`tp:${internalTarget.customerId}`);
+        wf.recordInstruction(ctxOf(TO, insAt), id(), {
+          channel: rng.pick(['LETTER', 'EMAIL', 'FORM', 'MANDATE'] as const),
+          receivedDate: isoDatePart(received),
+          receivedTime: isoTimePart(received),
+          amount: Number(comp) > 0 ? comp : toMoney('1000000'),
+          purpose: rng.pick([
+            'Customer instruction as per letter',
+            'Business operating expenses',
+            'School fees',
+            'Payment to supplier',
+            'Investment instruction',
+            'Personal use',
+            'Property payment',
+          ]),
+          documents: [
+            {
+              fileName: `instruction-${txn.txnRef}.pdf`,
+              mimeType: 'application/pdf',
+              sizeBytes: 184_320,
+              dataUrl: null,
+            },
+          ],
+          payDestination: external ? 'EXTERNAL' : 'INTERNAL',
+          benefName: external
+            ? (benef?.benefName ?? subj.customer.customerName)
+            : (internalTarget?.accountName ?? null),
+          bankCode: external ? (benef?.bankCode ?? bank.bankCode) : null,
+          accountNo: external
+            ? (benef?.accountNo ?? String(rng.int(1_000_000_000, 9_999_999_999)))
+            : (internalTarget?.accountNo ?? null),
+          accountType: external
+            ? (benef?.accountType ?? 'CURRENT')
+            : internalTarget
+              ? 'SAVINGS'
+              : null,
+        });
       });
-    });
     if (p.target === 'CANCELLED') {
       const w = at();
       push(w, () =>
@@ -1244,14 +1263,15 @@ function populate(db: Db, T: string, anchor: string, fresh: boolean) {
     }
     // 2. signature
     const sigAt = at();
-    push(sigAt, () =>
-      wf.verifySignature(ctxOf(TO, sigAt), id(), {
-        sigOk: true,
-        mandateOk: true,
-        ownershipOk: true,
-        completeOk: true,
-      })
-    );
+    if (!charge)
+      push(sigAt, () =>
+        wf.verifySignature(ctxOf(TO, sigAt), id(), {
+          sigOk: true,
+          mandateOk: true,
+          ownershipOk: true,
+          completeOk: true,
+        })
+      );
     if (p.target === 'VERIFICATION') continue;
     // 3. Eazybankz
     const cbsAt = at();

@@ -19,7 +19,7 @@ The user menu switches between the demo users in one click.
 | `npm run build` | Production build (runs ESLint + Prettier rules) |
 | `npm run test:calc` | Calculation checks from the brief (6/6 required + 12 extra, including the client's COT examples) |
 | `npm run seed:report` | Rebuilds the demo data, checks invariants, prints counts |
-| `npm run test:flow` | All 16 scenarios end to end through every role, plus the exception paths |
+| `npm run test:flow` | All 18 scenarios end to end through every role, plus the exception paths |
 | `npm run test:e2e` | Playwright: sign-in, route crawler, flows, CRUD, responsive |
 
 > Stop `npm run dev` before `npm run build` — the build overwrites the dev server's output. If the app goes blank,
@@ -27,7 +27,7 @@ The user menu switches between the demo users in one click.
 
 ## What the demo covers
 
-- **All 16 scenarios** run end to end (the 15 in the SOP plus Inflow B). The Treasury Officer prepares
+- **All 18 scenarios** run end to end (the 15 in the SOP, Inflow B and the two COT scenarios). The Treasury Officer prepares
   everything — instruction, signature verification, Eazybankz check and the full voucher (new rate, tenor and so
   on) — and signs. It then goes to the customer's **Account Officer**, then Head of Treasury → MIS → Internal
   Audit → MD → Operations (two officers) → Treasury confirmation. Six signatures in all.
@@ -86,11 +86,13 @@ The user menu switches between the demo users in one click.
   entries sit at the top, and a filter shows each group. An auditor never reviews their own actions. "Verify
   integrity" is a separate, automatic check that no entry has been altered or deleted, and the page explains
   the difference.
-- **Commission on turnover (COT)** is charged on debits: money paid out of a Current account and out of Call
-  placements. COT = rate × amount ÷ 1,000. The Treasury Officer chooses the rate on each transaction — ₦2 per
-  mille, ₦5 per mille or any other rate — and the voucher cannot be signed until one is chosen. ₦1,000,000 at ₦2
-  is ₦2,000, at ₦5 is ₦5,000. COT is deducted from what is paid out, shown on the voucher and in the charges
-  report, and can be switched off for one transaction with a reason.
+- **Commission on turnover (COT) is its own transaction type** (New transaction → Commission on turnover), with
+  two scenarios: A, a Current (CMS) account, and B, a Call account. It does not touch any other transaction.
+  There is no customer instruction or signature check, so the wizard has three steps: account, Eazybankz,
+  voucher. The Treasury Officer enters the turnover and chooses the rate — ₦2 per mille, ₦5 per mille or any
+  other — and the COT Voucher shows COT = rate × turnover ÷ 1,000 (₦1,000,000 at ₦2 is ₦2,000, at ₦5 is ₦5,000).
+  It goes Treasury Officer → Head of Treasury → Operations (two officers). On execution the COT is debited from
+  the Current account; for a Call account Operations post it in Eazybankz. COT shows in the charges report.
 - **Several documents everywhere.** The instruction can have several documents, a paper signature several
   pages, and every transaction has a Documents tab where anyone working on it can add supporting documents,
   several at a time (PDF, PNG or JPEG, up to 1 MB each).
@@ -141,8 +143,8 @@ next role. Swapping `NEXT_PUBLIC_USE_MOCK=false` points the same screens at the 
 
 ## Demo data
 
-Rebuilt for "today" on first load each day, so it never goes stale: 40 customers, 102 accounts, 171 investments,
-20 banks, 25 beneficiaries, public holidays, and 79 transactions covering every status and every type (at least 8
+Rebuilt for "today" on first load each day, so it never goes stale: 40 customers, 102 accounts, 172 investments,
+20 banks, 25 beneficiaries, public holidays, and 84 transactions covering every status and every type (at least 8
 waiting at each of the five approval levels, 3 SLA breaches, returns, rejections, stops, failed payments, two
 batches, a recall, a pending recall request, paper signatures, Inflow B items and payment records awaiting a
 second Operations officer). Plenty is left untouched for new work: 20 matured investments awaiting instruction,
@@ -171,8 +173,8 @@ every transaction themselves and take it through from the start.
 
 ### Round 3 assumptions still open (each is easy to change)
 
-- **COT** is deducted from the amount paid out (not charged on top). Personal and Savings accounts and term
-  deposits are not charged.
+- **COT on a Call account** is posted by Operations in Eazybankz and recorded on the voucher; the Call
+  placement's principal in TreasuryDesk is not changed.
 - **Inflow B** to a Call account or "Other" is posted by Operations in Eazybankz and recorded with the account
   number the officer types. Overdraft was removed, as the client asked.
 - **Paper signatures** follow the client's own process: the upload counts at once and the approver can dispute.

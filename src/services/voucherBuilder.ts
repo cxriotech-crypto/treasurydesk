@@ -39,7 +39,7 @@ import {
 } from '@/lib/calc';
 import { daysBetween, isWeekend, maxDate, nextBusinessDay } from '@/lib/dates';
 import { formatDateWithDay, formatNaira } from '@/lib/format';
-import { ZERO, add, isPositive, sub, toMoney } from '@/lib/money';
+import { ZERO, add, gt, isPositive, toMoney } from '@/lib/money';
 
 export type VoucherDraft = Omit<Voucher, 'id' | 'version' | 'voucherNo' | 'txnId' | 'createdAt'>;
 
@@ -92,21 +92,6 @@ export interface TxnComputation {
   maturityPrompt: MaturityPrompt | null;
   /** Short list of the key figures (dashboards, lists, confirmation dialogs). */
   summary: SummaryLine[];
-  /**
-   * Commission on turnover, charged on a debit: money paid out of a Current account or out of a Call placement.
-   * The rate is chosen on each transaction. Null when it does not apply.
-   */
-  cot: { scope: 'CA' | 'CALL'; on: boolean; ratePerMille: string | null; amount: string } | null;
-}
-
-/** Where commission on turnover applies to this transaction, if anywhere. */
-export function cotScope(c: TxnCalcContext): 'CA' | 'CALL' | null {
-  const s = c.txn.scenarioCode;
-  if ((s === 'THIRD_PARTY_EXT' || s === 'THIRD_PARTY_INT') && c.sourceAccount?.productCode === 'CA')
-    return 'CA';
-  if (c.investment?.productCode === 'CALL' && SCENARIO_META[s].vouchers.includes('FO'))
-    return 'CALL';
-  return null;
 }
 
 // ─── Row helpers ─────────────────────────────────────────────────────────────
@@ -405,6 +390,57 @@ export function computeTxn(c: TxnCalcContext, baseEnv: CalcEnv): TxnComputation 
       summary.push(
         { label: 'Amount', value: amount, format: 'money' },
         { label: 'Credit to', value: where, format: 'text' }
+      );
+      break;
+    }
+
+    case 'COT_CMS':
+    case 'COT_CALL': {
+      // Commission on turnover, its own transaction: rate per mille × turnover ÷ 1,000, debited from the account.
+      const acc = s === 'COT_CMS' ? c.sourceAccount : null;
+      const inv = s === 'COT_CALL' ? requireInv(c) : null;
+      const date = i.valueDate ?? c.today;
+      const amtErr = validateAmount(i.amount, 'Turnover');
+      if (amtErr) errors.amount = amtErr;
+      const turnover = amtErr ? ZERO : toMoney(i.amount!);
+      const rate = i.cotRatePerMille?.trim() || '';
+      if (!rate) errors.cotRatePerMille = 'Choose the COT rate';
+      const r = rate ? calcCot(turnover, rate) : null;
+      if (r) Object.assign(errors, r.errors);
+      const cot =
+        r && !r.errors.cotRatePerMille ? r.cot : { value: ZERO, formula: 'Choose the rate' };
+      if (acc && !errors.amount && gt(cot.value, acc.availableBal))
+        errors.amount = `COT ${formatNaira(cot.value)} exceeds the available balance ${formatNaira(acc.availableBal)}`;
+      const where = acc
+        ? `${acc.accountNo} (Current account)`
+        : `${inv!.investmentRef} (Call placement)`;
+      const v = blankVoucher('CT', 1, date);
+      Object.assign(v, {
+        principalAmt: turnover,
+        cotAmt: cot.value,
+        netAmt: cot.value,
+        effectiveDate: date,
+        remarks: withPurpose(
+          i.remarks ?? `Commission on turnover${rate ? ` at ₦${rate} per mille` : ''} on ${where}`
+        ),
+        rows: [
+          info(acc ? 'Current (CMS) account' : 'Call account', where),
+          ...(acc ? [info('Available balance', acc.availableBal, 'money')] : []),
+          money(
+            'Turnover',
+            { value: turnover, formula: 'Turnover the commission is charged on' },
+            'input'
+          ),
+          info('COT rate', rate ? `₦${rate} per mille` : '—'),
+          total('COT to debit', cot),
+          input('Value date', date, 'date'),
+        ],
+      });
+      vouchers.push(v);
+      headlineAmt = cot.value;
+      summary.push(
+        { label: 'Turnover', value: turnover, format: 'money' },
+        { label: 'COT', value: cot.value, format: 'money' }
       );
       break;
     }
@@ -920,58 +956,6 @@ export function computeTxn(c: TxnCalcContext, baseEnv: CalcEnv): TxnComputation 
   if (chargeOff && !i.preliqChargeOffReason?.trim())
     errors.preliqChargeOffReason = 'Give a reason for not applying the pre-liquidation charge';
 
-  // Commission on turnover: rate × amount ÷ 1,000, deducted from what is paid out. It can be switched off
-  // for one transaction with a reason, like the other deductions.
-  let cot: TxnComputation['cot'] = null;
-  const scope = cotScope(c);
-  if (scope) {
-    const on = i.cotOn !== false;
-    const rate = i.cotRatePerMille?.trim() || null;
-    if (on && !rate) errors.cotRatePerMille = 'Choose the COT rate for this transaction';
-    let charged = ZERO;
-    for (const v of vouchers) {
-      if (v.voucherType !== 'FO' || !isPositive(v.netAmt)) continue;
-      const base = scope === 'CA' ? v.principalAmt : v.netAmt;
-      const at = v.rows.map((r) => r.kind).lastIndexOf('total') + 1;
-      if (!on) {
-        v.rows.splice(at, 0, {
-          ...info('COT (not charged)', ZERO, 'money'),
-          ...(i.cotOffReason?.trim() ? { note: `Not charged: ${i.cotOffReason.trim()}` } : {}),
-        });
-        continue;
-      }
-      if (!rate) continue;
-      const r = calcCot(base, rate);
-      Object.assign(errors, r.errors);
-      if (r.errors.cotRatePerMille) continue;
-      const net = sub(v.netAmt, r.cot.value);
-      const paid = scope === 'CA' ? 'To beneficiary after COT' : 'Paid out after COT';
-      v.rows.splice(
-        at,
-        0,
-        money(`COT (₦${rate} per mille)`, r.cot),
-        total(paid, {
-          value: net,
-          formula: `${formatNaira(v.netAmt)} − ${formatNaira(r.cot.value)} = ${formatNaira(net)}`,
-        })
-      );
-      for (const line of summary)
-        if (
-          line.value === v.netAmt &&
-          ['To beneficiary', 'Payout', 'Net payable'].includes(line.label)
-        )
-          line.value = net;
-      v.cotAmt = r.cot.value;
-      v.netAmt = net;
-      if (v.payment) v.payment = { ...v.payment, amount: net };
-      charged = add(charged, r.cot.value);
-    }
-    if (!on && !i.cotOffReason?.trim())
-      errors.cotOffReason = 'Give a reason for not charging commission on turnover';
-    if (isPositive(charged)) summary.push({ label: 'COT', value: charged, format: 'money' });
-    cot = { scope, on, ratePerMille: rate, amount: charged };
-  }
-
   // One voucher per transaction: a transaction that both pays out and rolls over (rollover B, C and D, partial
   // pre-liquidation) carries both parts on a single voucher, each under its own heading.
   const issued = vouchers.length > 1 ? [mergeVouchers(vouchers, types[0])] : vouchers;
@@ -979,7 +963,7 @@ export function computeTxn(c: TxnCalcContext, baseEnv: CalcEnv): TxnComputation 
   if (built !== types.join(','))
     throw new Error(`Voucher mismatch for ${s}: ${built} ≠ ${types.join(',')}`);
 
-  return { vouchers: issued, headlineAmt, errors, notes, summary, maturityPrompt, cot };
+  return { vouchers: issued, headlineAmt, errors, notes, summary, maturityPrompt };
 }
 
 const section = (label: string): VoucherRow => ({

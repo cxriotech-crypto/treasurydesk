@@ -51,6 +51,9 @@ function fieldsFor(s: ScenarioCode): Key[] {
       return ['amount', 'newRate', 'newTenorDays', 'valueDate', 'productCode', 'annivFreqDays'];
     case 'INFLOW_ACCOUNT':
       return ['amount', 'valueDate', 'creditTo', 'creditAccountNo', 'creditOther'];
+    case 'COT_CMS':
+    case 'COT_CALL':
+      return ['amount', 'valueDate'];
     case 'MATURITY':
     case 'PRELIQ_FULL':
       return ['valueDate'];
@@ -84,11 +87,13 @@ function labelFor(s: ScenarioCode, k: Key): string {
         ? 'Principal'
         : s === 'INFLOW_ACCOUNT'
           ? 'Amount received'
-          : s === 'PRELIQ_PARTIAL'
-            ? 'Amount requested'
-            : 'Amount';
+          : t === 'COT'
+            ? 'Turnover'
+            : s === 'PRELIQ_PARTIAL'
+              ? 'Amount requested'
+              : 'Amount';
     case 'valueDate':
-      if (s === 'INFLOW_ACCOUNT') return 'Value date';
+      if (s === 'INFLOW_ACCOUNT' || t === 'COT') return 'Value date';
       return s === 'INFLOW' || (t === 'TRANSFER' && s !== 'TRANSFER_SS_PA')
         ? 'Effective / transfer date'
         : t === 'ROLLOVER'
@@ -143,7 +148,7 @@ export function StepVoucher({ detail, goTo }: StepProps) {
   const [input, setInput] = useState<TxnInput>(txn.input);
   const [tab, setTab] = useState('0');
   const [signOpen, setSignOpen] = useState(false);
-  const [switchOff, setSwitchOff] = useState<'wht' | 'charge' | 'cot' | null>(null);
+  const [switchOff, setSwitchOff] = useState<'wht' | 'charge' | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const debounced = useDebounced(input, 150);
   const key = JSON.stringify(clean(debounced));
@@ -401,26 +406,22 @@ export function StepVoucher({ detail, goTo }: StepProps) {
   const fo = vouchers.find((v) => v.voucherType === 'FO' || !!v.payment);
 
   // Switching a deduction off needs a reason, like every other exception in the app.
-  const switchOn = (which: 'wht' | 'charge' | 'cot') =>
+  const switchOn = (which: 'wht' | 'charge') =>
     setInput((i) =>
       which === 'wht'
         ? { ...i, whtOn: true, whtOffReason: undefined }
-        : which === 'charge'
-          ? { ...i, preliqChargeOn: true, preliqChargeOffReason: undefined }
-          : { ...i, cotOn: true, cotOffReason: undefined }
+        : { ...i, preliqChargeOn: true, preliqChargeOffReason: undefined }
     );
-  const confirmSwitchOff = (which: 'wht' | 'charge' | 'cot', reason: string) =>
+  const confirmSwitchOff = (which: 'wht' | 'charge', reason: string) =>
     setInput((i) =>
       which === 'wht'
         ? { ...i, whtOn: false, whtOffReason: reason.trim() }
-        : which === 'charge'
-          ? { ...i, preliqChargeOn: false, preliqChargeOffReason: reason.trim() }
-          : { ...i, cotOn: false, cotOffReason: reason.trim() }
+        : { ...i, preliqChargeOn: false, preliqChargeOffReason: reason.trim() }
     );
 
   // Commission on turnover: where it applies, the officer chooses the rate on each transaction (₦2, ₦5 or any
   // other per mille).
-  const cot = comp.data?.cot ?? null;
+  const cot = SCENARIO_META[s].txnType === 'COT';
   const cotRate = input.cotRatePerMille ?? '';
   const [cotOther, setCotOther] = useState(false);
   const cotChoice = cotOther || (cotRate && !['2', '5'].includes(cotRate)) ? 'OTHER' : cotRate;
@@ -450,7 +451,47 @@ export function StepVoucher({ detail, goTo }: StepProps) {
             />
           </Field>
         </div>
-        {showWht || showCharge || cot ? (
+        {cot ? (
+          <div className="mt-4 rounded-md border border-border px-3 py-3">
+            <p className="text-[13px] font-semibold">COT rate (per mille) *</p>
+            <p className="mb-2 text-xs text-muted">
+              COT = rate × turnover ÷ 1,000. Choose the rate for this charge.
+            </p>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+              <Segmented<string>
+                label="COT rate"
+                value={cotChoice}
+                onChange={(v) => {
+                  setCotOther(v === 'OTHER');
+                  set('cotRatePerMille', v === 'OTHER' ? undefined : v);
+                }}
+                options={[
+                  { value: '2', label: '₦2 per mille' },
+                  { value: '5', label: '₦5 per mille' },
+                  { value: 'OTHER', label: 'Other' },
+                ]}
+              />
+              {cotChoice === 'OTHER' ? (
+                <Field label="Rate per mille" error={errors.cotRatePerMille} className="sm:w-40">
+                  <Input
+                    inputMode="decimal"
+                    value={input.cotRatePerMille ?? ''}
+                    placeholder="e.g. 3.5"
+                    onChange={(e) =>
+                      set('cotRatePerMille', e.target.value.replace(/[^\d.]/g, '') || undefined)
+                    }
+                    suffix="‰"
+                    className="num text-right"
+                  />
+                </Field>
+              ) : null}
+            </div>
+            {errors.cotRatePerMille && cotChoice !== 'OTHER' ? (
+              <p className="mt-1 text-xs text-st-danger-fg">{errors.cotRatePerMille}</p>
+            ) : null}
+          </div>
+        ) : null}
+        {showWht || showCharge ? (
           <div className="mt-4 rounded-md border border-border px-3">
             {showWht ? (
               <Switch
@@ -480,61 +521,6 @@ export function StepVoucher({ detail, goTo }: StepProps) {
               <p className="pb-2 text-xs text-st-warning-fg">
                 Not applied: {input.preliqChargeOffReason}
               </p>
-            ) : null}
-            {cot ? (
-              <>
-                <Switch
-                  label="Charge commission on turnover (COT)"
-                  description={`Charged on this debit from the ${cot.scope === 'CA' ? 'Current account' : 'Call placement'}: rate × amount ÷ 1,000, deducted from what is paid out. Choose the rate below.${cot.on && isPositive(cot.amount) ? ` ${formatNaira(cot.amount)} on this transaction.` : ''}`}
-                  checked={input.cotOn !== false}
-                  onChange={(v) => (v ? switchOn('cot') : setSwitchOff('cot'))}
-                />
-                {input.cotOn !== false ? (
-                  <div className="flex flex-col gap-2 pb-3 sm:flex-row sm:items-end">
-                    <Segmented<string>
-                      label="COT rate"
-                      value={cotChoice}
-                      onChange={(v) => {
-                        setCotOther(v === 'OTHER');
-                        set('cotRatePerMille', v === 'OTHER' ? undefined : v);
-                      }}
-                      options={[
-                        { value: '2', label: '₦2 per mille' },
-                        { value: '5', label: '₦5 per mille' },
-                        { value: 'OTHER', label: 'Other' },
-                      ]}
-                    />
-                    {cotChoice === 'OTHER' ? (
-                      <Field
-                        label="Rate per mille"
-                        error={errors.cotRatePerMille}
-                        className="sm:w-40"
-                      >
-                        <Input
-                          inputMode="decimal"
-                          value={input.cotRatePerMille ?? ''}
-                          placeholder="e.g. 3.5"
-                          onChange={(e) =>
-                            set(
-                              'cotRatePerMille',
-                              e.target.value.replace(/[^\d.]/g, '') || undefined
-                            )
-                          }
-                          suffix="‰"
-                          className="num text-right"
-                        />
-                      </Field>
-                    ) : null}
-                    {errors.cotRatePerMille && cotChoice !== 'OTHER' ? (
-                      <p className="text-xs text-st-danger-fg">{errors.cotRatePerMille}</p>
-                    ) : null}
-                  </div>
-                ) : input.cotOffReason ? (
-                  <p className="pb-2 text-xs text-st-warning-fg">
-                    Not charged: {input.cotOffReason}
-                  </p>
-                ) : null}
-              </>
             ) : null}
           </div>
         ) : null}
@@ -690,33 +676,21 @@ export function StepVoucher({ detail, goTo }: StepProps) {
         title={
           switchOff === 'charge'
             ? 'Do not apply the pre-liquidation charge'
-            : switchOff === 'cot'
-              ? 'Do not charge commission on turnover'
-              : 'Do not deduct withholding tax'
+            : 'Do not deduct withholding tax'
         }
         description={
           switchOff === 'charge'
             ? 'The charge will be zero on this voucher. The reason is printed on the voucher and kept in the audit trail.'
-            : switchOff === 'cot'
-              ? 'No COT will be deducted on this voucher. The reason is printed on the voucher and kept in the audit trail.'
-              : 'No withholding tax will be deducted on this voucher. The reason is printed on the voucher and kept in the audit trail.'
+            : 'No withholding tax will be deducted on this voucher. The reason is printed on the voucher and kept in the audit trail.'
         }
-        confirmLabel={
-          switchOff === 'charge'
-            ? 'Switch the charge off'
-            : switchOff === 'cot'
-              ? 'Switch COT off'
-              : 'Switch the tax off'
-        }
+        confirmLabel={switchOff === 'charge' ? 'Switch the charge off' : 'Switch the tax off'}
         tone="danger"
         reason={{
           label: 'Reason',
           placeholder:
             switchOff === 'charge'
               ? 'e.g. Head of Treasury waived the charge — customer bereavement'
-              : switchOff === 'cot'
-                ? 'e.g. COT waived for this customer by the MD'
-                : 'e.g. Customer produced a valid tax exemption certificate',
+              : 'e.g. Customer produced a valid tax exemption certificate',
           required: true,
         }}
         onConfirm={(reason) => {

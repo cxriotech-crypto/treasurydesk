@@ -172,6 +172,7 @@ export const TXN_TYPES = [
   'THIRD_PARTY',
   'TRANSFER',
   'INFLOW',
+  'COT',
 ] as const;
 export type TxnType = (typeof TXN_TYPES)[number];
 
@@ -195,9 +196,14 @@ export const TXN_TYPE_META: Record<TxnType, { sop: number; label: string; descri
     label: 'Inflow',
     description: 'Book a new investment, or credit an account',
   },
+  COT: {
+    sop: 0, // not an SOP transaction: added at the client's request
+    label: 'Commission on turnover',
+    description: 'Charge COT on a Current (CMS) or Call account',
+  },
 };
 
-export const VOUCHER_TYPES = ['FI', 'FO', 'RO', 'TS'] as const;
+export const VOUCHER_TYPES = ['FI', 'FO', 'RO', 'TS', 'CT'] as const;
 export type VoucherType = (typeof VOUCHER_TYPES)[number];
 
 export const VOUCHER_TYPE_META: Record<
@@ -208,6 +214,7 @@ export const VOUCHER_TYPE_META: Record<
   FO: { label: 'Funds-Out Voucher', title: 'FUNDS-OUT VOUCHER', prefix: 'FO' },
   RO: { label: 'Roll-over Slip', title: 'ROLL-OVER SLIP', prefix: 'RO' },
   TS: { label: 'Transfer Slip', title: 'TRANSFER SLIP', prefix: 'TS' },
+  CT: { label: 'COT Voucher', title: 'COMMISSION ON TURNOVER VOUCHER', prefix: 'CT' },
 };
 
 export const SCENARIO_CODES = [
@@ -227,6 +234,8 @@ export const SCENARIO_CODES = [
   'TRANSFER_REVERSAL',
   'INFLOW',
   'INFLOW_ACCOUNT',
+  'COT_CMS',
+  'COT_CALL',
 ] as const;
 export type ScenarioCode = (typeof SCENARIO_CODES)[number];
 
@@ -241,6 +250,11 @@ export interface ScenarioMeta {
   payout: boolean;
   /** What the wizard asks the maker to pick in step 1. */
   subject: 'INVESTMENT' | 'ACCOUNT' | 'TXN' | 'CUSTOMER';
+  /**
+   * Starts from a customer instruction (with its signature check). False for a bank charge such as COT, which
+   * skips those two steps.
+   */
+  instruction?: false;
 }
 
 export const SCENARIO_META: Record<ScenarioCode, ScenarioMeta> = {
@@ -389,6 +403,27 @@ export const SCENARIO_META: Record<ScenarioCode, ScenarioMeta> = {
     payout: false,
     subject: 'CUSTOMER',
   },
+  COT_CMS: {
+    txnType: 'COT',
+    letter: 'A',
+    label: 'Current (CMS) account',
+    description:
+      'Charge COT on the turnover of a customer’s Current account, at the rate you choose',
+    vouchers: ['CT'],
+    payout: false,
+    subject: 'ACCOUNT',
+    instruction: false,
+  },
+  COT_CALL: {
+    txnType: 'COT',
+    letter: 'B',
+    label: 'Call account',
+    description: 'Charge COT on the turnover of a Call placement, at the rate you choose',
+    vouchers: ['CT'],
+    payout: false,
+    subject: 'INVESTMENT',
+    instruction: false,
+  },
 };
 
 /** Where an inflow credited to an account (Inflow B) goes. */
@@ -404,10 +439,11 @@ export const CREDIT_TARGET_LABELS: Record<CreditTarget, string> = {
 
 /**
  * The approval levels a scenario goes through (1 = Treasury Officer, who always signs first). An inflow credited to
- * an account needs only the Head of Treasury before Operations; everything else goes through all six levels.
+ * an account and a COT charge need only the Head of Treasury before Operations; everything else goes through all
+ * six levels.
  */
 export function chainLevels(s: ScenarioCode): number[] {
-  return s === 'INFLOW_ACCOUNT' ? [1, 3] : [1, 2, 3, 4, 5, 6];
+  return s === 'INFLOW_ACCOUNT' || SCENARIO_META[s].txnType === 'COT' ? [1, 3] : [1, 2, 3, 4, 5, 6];
 }
 
 export function scenariosForType(t: TxnType): ScenarioCode[] {

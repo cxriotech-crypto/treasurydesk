@@ -117,6 +117,8 @@ function inputFor(s: ScenarioCode, subj: ReturnType<typeof subjectFor>): TxnInpu
       if (s === 'TRANSFER_REVERSAL') return { correctedRate: '25.00' };
       if (s === 'TRANSFER_SS_PA') return { valueDate: bizDay(), amount: '100000.00' };
       return { valueDate: bizDay(), amount: '1000000.00', newRate: '17.50', newTenorDays: 90 };
+    case 'COT':
+      return { valueDate: bizDay(), amount: '10000000.00', cotRatePerMille: '5' };
     case 'INFLOW':
       if (s === 'INFLOW_ACCOUNT')
         return { valueDate: bizDay(), amount: '3000000.00', creditTo: 'PA' };
@@ -159,8 +161,7 @@ async function prepareScenario(s: ScenarioCode, o: RunOpts = {}) {
   let t = await S.transactionsService.create({
     scenarioCode: s,
     ...subj,
-    // The COT rate is chosen on each transaction; it only counts where COT applies.
-    input: { ...inputFor(s, subj), ...(SCENARIO_META[s].payout ? { cotRatePerMille: '2' } : {}) },
+    input: inputFor(s, subj),
   });
   const cust = db().customers.find((c) => c.id === subj.customerId)!;
   const now = nowIso();
@@ -170,33 +171,36 @@ async function prepareScenario(s: ScenarioCode, o: RunOpts = {}) {
     s === 'THIRD_PARTY_INT'
       ? db().accounts.find((a) => a.productCode === 'PA' && a.customerId !== cust.id)!
       : null;
-  await S.transactionsService.recordInstruction(t.id, {
-    channel: 'LETTER',
-    receivedDate: isoDatePart(now),
-    receivedTime: isoTimePart(now),
-    amount: t.headlineAmt !== '0.00' ? t.headlineAmt : '1000000.00',
-    purpose: 'Flow check',
-    documents: [
-      { fileName: 'letter.pdf', mimeType: 'application/pdf', sizeBytes: 120_000, dataUrl: null },
-      {
-        fileName: 'letter-page-2.pdf',
-        mimeType: 'application/pdf',
-        sizeBytes: 90_000,
-        dataUrl: null,
-      },
-    ],
-    payDestination: external ? 'EXTERNAL' : 'INTERNAL',
-    benefName: external ? cust.customerName : (internalBenef?.accountName ?? null),
-    bankCode: external ? '058' : null,
-    accountNo: external ? '0123456789' : (internalBenef?.accountNo ?? null),
-    accountType: external || internalBenef ? 'SAVINGS' : null,
-  });
-  await S.transactionsService.verifySignature(t.id, {
-    sigOk: true,
-    mandateOk: true,
-    ownershipOk: true,
-    completeOk: true,
-  });
+  // A bank charge (COT) has no customer instruction or signature to check.
+  if (SCENARIO_META[s].instruction !== false) {
+    await S.transactionsService.recordInstruction(t.id, {
+      channel: 'LETTER',
+      receivedDate: isoDatePart(now),
+      receivedTime: isoTimePart(now),
+      amount: t.headlineAmt !== '0.00' ? t.headlineAmt : '1000000.00',
+      purpose: 'Flow check',
+      documents: [
+        { fileName: 'letter.pdf', mimeType: 'application/pdf', sizeBytes: 120_000, dataUrl: null },
+        {
+          fileName: 'letter-page-2.pdf',
+          mimeType: 'application/pdf',
+          sizeBytes: 90_000,
+          dataUrl: null,
+        },
+      ],
+      payDestination: external ? 'EXTERNAL' : 'INTERNAL',
+      benefName: external ? cust.customerName : (internalBenef?.accountName ?? null),
+      bankCode: external ? '058' : null,
+      accountNo: external ? '0123456789' : (internalBenef?.accountNo ?? null),
+      accountType: external || internalBenef ? 'SAVINGS' : null,
+    });
+    await S.transactionsService.verifySignature(t.id, {
+      sigOk: true,
+      mandateOk: true,
+      ownershipOk: true,
+      completeOk: true,
+    });
+  }
   await S.transactionsService.refreshFromCbs(t.id);
   await S.transactionsService.confirmCbs(t.id, {
     fundsReceived: true,
@@ -392,18 +396,32 @@ async function main() {
       };
       const beforeInv = db().investments.length;
       let paBefore = '';
+      let srcBefore = '';
       const t = await runScenario(s, {
         ...opts,
-        onPrepared: (x) =>
-          (paBefore =
+        onPrepared: (x) => {
+          srcBefore = db().accounts.find((a) => a.id === x.sourceAccountId)?.availableBal ?? '';
+          paBefore =
             db().accounts.find((a) => a.customerId === x.customerId && a.productCode === 'PA')
-              ?.availableBal ?? ''),
+              ?.availableBal ?? '';
+        },
       });
       const d = db();
       let effect = '';
       const orig = d.investments.find((i) => i.id === t.investmentId);
       const created = d.investments.length - beforeInv;
       switch (SCENARIO_META[s].txnType) {
+        case 'COT': {
+          const cot = d.vouchers.find((v) => v.txnId === t.id)!.cotAmt;
+          if (cot !== '50000.00') throw new Error(`COT ${cot}, expected 50000.00`);
+          if (s === 'COT_CMS') {
+            const now = d.accounts.find((a) => a.id === t.sourceAccountId)!.availableBal;
+            if (now !== sub(srcBefore, cot))
+              throw new Error(`Current account not debited (${srcBefore} → ${now})`);
+          }
+          effect = `₦50,000 COT at ₦5 per mille · Treasury Officer → Head of Treasury → Operations`;
+          break;
+        }
         case 'INFLOW':
           if (s === 'INFLOW_ACCOUNT') {
             const pa = d.accounts.find(
@@ -801,18 +819,24 @@ async function main() {
     fail('One voucher per transaction', (e as Error).message);
   }
 
-  // 2g. Commission on turnover on a Current account debit: rate × amount ÷ 1,000, rate chosen each time.
+  // 2g. Commission on turnover is its own transaction: rate per mille × turnover ÷ 1,000, rate chosen each time.
   try {
     await as('TO');
     const acc = db().accounts.find(
       (a) => a.productCode === 'CA' && a.status === 'ACTIVE' && gt(a.availableBal, '2000000')
     )!;
     const draft = await S.transactionsService.create({
-      scenarioCode: 'THIRD_PARTY_EXT',
+      scenarioCode: 'COT_CMS',
       customerId: acc.customerId,
       sourceAccountId: acc.id,
       input: { amount: '1000000.00' },
     });
+    draft.status === 'VERIFICATION'
+      ? pass(
+          'A COT charge needs no customer instruction or signature check',
+          'starts at verification'
+        )
+      : fail('A COT charge starts at verification', draft.status);
     const at = async (input: Record<string, unknown>) =>
       S.transactionsService.preview(draft.id, { amount: '1000000.00', ...input });
     const none = await at({});
@@ -821,37 +845,30 @@ async function main() {
       : fail('The COT rate must be chosen on each transaction', 'no error raised');
     const two = await at({ cotRatePerMille: '2' });
     const five = await at({ cotRatePerMille: '5' });
-    const fo2 = two.vouchers[0];
-    const fo5 = five.vouchers[0];
-    fo2.cotAmt === '2000.00' && fo5.cotAmt === '5000.00' && fo5.netAmt === '994000.00'
+    two.vouchers[0].cotAmt === '2000.00' && five.vouchers[0].cotAmt === '5000.00'
       ? pass(
-          'COT on a Current account debit: ₦2 and ₦5 per mille',
-          `₦1,000,000 → ${fo2.cotAmt} / ${fo5.cotAmt}`
+          'COT on ₦1,000,000 of turnover: ₦2,000 at ₦2, ₦5,000 at ₦5 per mille',
+          `${two.vouchers[0].voucherType} voucher`
         )
-      : fail('COT on a Current account debit', `${fo2.cotAmt} / ${fo5.cotAmt} / net ${fo5.netAmt}`);
-    const off = await at({ cotOn: false });
-    off.errors.cotOffReason
-      ? pass('Switching COT off needs a reason', off.errors.cotOffReason)
-      : fail('Switching COT off needs a reason', 'no error raised');
+      : fail('COT amounts', `${two.vouchers[0].cotAmt} / ${five.vouchers[0].cotAmt}`);
     const bad = await at({ cotRatePerMille: '0' });
     bad.errors.cotRatePerMille
       ? pass('A COT rate must be more than 0', bad.errors.cotRatePerMille)
       : fail('A COT rate must be more than 0', 'no error raised');
     await S.transactionsService.cancel(draft.id, 'flow check');
-    const pa = db().accounts.find(
-      (a) => a.productCode === 'PA' && a.status === 'ACTIVE' && gt(a.availableBal, '2000000')
-    )!;
-    const fromPa = await S.transactionsService.create({
+    // No other transaction carries COT any more.
+    const tp = await S.transactionsService.create({
       scenarioCode: 'THIRD_PARTY_EXT',
-      customerId: pa.customerId,
-      sourceAccountId: pa.id,
+      customerId: acc.customerId,
+      sourceAccountId: acc.id,
       input: { amount: '1000000.00' },
     });
-    const noCot = await S.transactionsService.preview(fromPa.id, { amount: '1000000.00' });
-    noCot.cot === null && noCot.vouchers[0].cotAmt === '0.00'
-      ? pass('No COT on a Personal Account debit', 'not charged')
-      : fail('No COT on a Personal Account debit', noCot.vouchers[0].cotAmt);
-    await S.transactionsService.cancel(fromPa.id, 'flow check');
+    const plain = await S.transactionsService.preview(tp.id, { amount: '1000000.00' });
+    plain.vouchers[0].cotAmt === '0.00' &&
+    !plain.vouchers[0].rows.some((r) => r.label.includes('COT'))
+      ? pass('A payment out of a Current account carries no COT', 'COT is its own transaction')
+      : fail('No COT on other transactions', plain.vouchers[0].cotAmt);
+    await S.transactionsService.cancel(tp.id, 'flow check');
   } catch (e) {
     fail('Commission on turnover', (e as Error).message);
   }

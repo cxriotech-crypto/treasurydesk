@@ -323,6 +323,49 @@ test.describe('Transaction flows', () => {
     expect(errors, `console errors while running ${ref}`).toEqual([]);
   });
 
+  test('commission on turnover is its own transaction, with the rate chosen each time', async ({
+    page,
+  }) => {
+    const errors = collectConsoleErrors(page);
+    await fastDemo(page);
+    await login(page, 'TO');
+    await page.goto('/transactions/new');
+    await page.getByRole('radio', { name: /Commission on turnover/ }).click();
+    await page.getByRole('radio', { name: /^A\. Current \(CMS\) account/ }).click();
+    const combo = page.locator('main input[role="combobox"]');
+    const options = page.locator('main [role="option"]');
+    let picked = false;
+    for (let i = 0; i < 40 && !picked; i++) {
+      await combo.click();
+      await options.nth(i).click();
+      const subjects = page.locator('[aria-label="Subject"] button:not([disabled])');
+      if (await subjects.count()) {
+        await subjects.first().click();
+        picked = true;
+      }
+    }
+    expect(picked, 'a customer with a Current account').toBeTruthy();
+    await page.getByRole('button', { name: /Create draft and continue/ }).click();
+    // No customer instruction or signature check: straight to Eazybankz.
+    await expect(page.getByRole('heading', { name: /2\. Eazybankz/ })).toBeVisible({
+      timeout: 20_000,
+    });
+    await page.getByRole('button', { name: 'Refresh from Eazybankz' }).click();
+    await page.getByLabel('Figures confirmed in Eazybankz').check();
+    await page.getByRole('button', { name: 'Continue to voucher' }).click();
+    await expect(page.getByRole('heading', { name: /3\. Voucher/ })).toBeVisible();
+    await page.getByRole('textbox', { name: /^Turnover/ }).fill('1,000,000');
+    await expect(page.getByText('Choose the COT rate').first()).toBeVisible();
+    await page.getByRole('radio', { name: '₦5 per mille' }).click();
+    await expect(page.getByText('₦5,000.00').first()).toBeVisible({ timeout: 20_000 });
+    await page.getByRole('button', { name: 'Sign & submit' }).click();
+    await sign(page, 'TO', 'Sign & submit');
+    await expect(page.getByText('Awaiting Head Treasury', { exact: true }).first()).toBeVisible({
+      timeout: 20_000,
+    });
+    expect(errors).toEqual([]);
+  });
+
   test('approvers can bulk approve with one signature', async ({ page }) => {
     await fastDemo(page);
     await login(page, 'HT');

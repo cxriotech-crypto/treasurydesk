@@ -250,7 +250,11 @@ export function StepSubject({
               }}
             >
               <span className="block text-sm font-medium">
-                <span className="num text-muted">SOP {TXN_TYPE_META[tt].sop}</span> ·{' '}
+                {TXN_TYPE_META[tt].sop ? (
+                  <>
+                    <span className="num text-muted">SOP {TXN_TYPE_META[tt].sop}</span> ·{' '}
+                  </>
+                ) : null}
                 {TXN_TYPE_META[tt].label}
               </span>
               <span className="block text-xs text-muted">{TXN_TYPE_META[tt].description}</span>
